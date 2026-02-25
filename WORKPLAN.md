@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 0 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 1 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -41,20 +41,20 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 1.1 | **Agregar estrategias al enum** | `shared/retrieval/core.py` | `CONTEXTUAL_VECTOR = auto()`, `CONTEXTUAL_HYBRID_RERANK = auto()` | Pendiente |
-| 1.2 | **Agregar enriched_contents a RetrievalResult** | `shared/retrieval/core.py` | `enriched_contents: Optional[List[str]] = None` | Pendiente |
-| 1.3 | **(PC-4)** **Extraer `batch_embed_queries()` a shared/** | `shared/llm.py` | Funcion standalone. MTEBEvaluator la invoca via import | Pendiente |
-| 1.4 | **CookbookConfig** | `sandbox_cookbook/config.py` | Dataclass con: InfraConfig, RetrievalConfig, RerankerConfig, dataset_path, eval_path, results_dir, strategy, contextualize params (incluyendo truncation limits), eval_k_values=[5,10,20]. Constructor `from_env()` | Pendiente |
-| 1.5 | **CookbookLoader** | `sandbox_cookbook/loader.py` | Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids en `relevant_doc_ids`. Validacion: cada golden chunk existe en corpus. **(PC-1)** NO asignar title a NormalizedDocument | Pendiente |
-| 1.6 | **CookbookEvaluator (solo SIMPLE_VECTOR)** | `sandbox_cookbook/evaluator.py` | Pipeline: load -> index con `doc.content` directo **(PC-1)** -> retrieve -> Recall@k -> build_run. **(PC-5)** CSV solo k=5,10,20. Sin generacion | Pendiente |
-| 1.7 | **Entry point** | `sandbox_cookbook/run.py` | `--strategy`, `--dry-run`, `--env`, `-v` | Pendiente |
-| 1.8 | **Tests loader** | `tests/test_cookbook_loader.py` | Parseo JSON, golden chunks validados, parent_documents en metadata, title=None | Pendiente |
-| 1.9 | **Tests config** | `tests/test_cookbook_config.py` | from_env(), validate(), summary(), eval_k_values default [5,10,20] | Pendiente |
-| 1.10 | **Tests evaluator (SIMPLE_VECTOR)** | `tests/test_cookbook_evaluator.py` | Pipeline completo con mocks: load→index→retrieve→evaluate→build_run. Validacion Pass@k content-based assertion | Pendiente |
-| 1.11 | **`__init__.py`** | `sandbox_cookbook/__init__.py` | Paquete Python valido | Pendiente |
-| 1.12 | **`env.example`** | `sandbox_cookbook/env.example` | Template con todas las variables de entorno documentadas | Pendiente |
-| 1.13 | **Registrar dataset en DATASET_CONFIG** | `shared/types.py` | Entrada `"cookbook"` en `DATASET_CONFIG` con `type=RETRIEVAL_ONLY`, `primary_metric=None`, sin generation | Pendiente |
-| 1.14 | **Verificar 162 tests originales pasan** | `tests/` | Sin regresiones en shared/ | Pendiente |
+| 1.1 | **Agregar estrategias al enum** | `shared/retrieval/core.py` | `CONTEXTUAL_VECTOR = auto()`, `CONTEXTUAL_HYBRID_RERANK = auto()` | **Hecho** |
+| 1.2 | **Agregar enriched_contents a RetrievalResult** | `shared/retrieval/core.py` | `enriched_contents: Optional[List[str]] = None` | **Hecho** |
+| 1.3 | **(PC-4)** **Extraer `batch_embed_queries()` a shared/** | `shared/llm.py` | Funcion standalone. MTEBEvaluator la invoca via import | **Hecho** |
+| 1.4 | **CookbookConfig** | `sandbox_cookbook/config.py` | Dataclass con: InfraConfig, RetrievalConfig, RerankerConfig, dataset_path, eval_path, results_dir, strategy, contextualize params (incluyendo truncation limits), eval_k_values=[5,10,20]. Constructor `from_env()` | **Hecho** |
+| 1.5 | **CookbookLoader** | `sandbox_cookbook/loader.py` | Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids en `relevant_doc_ids`. Validacion: cada golden chunk existe en corpus. **(PC-1)** NO asignar title a NormalizedDocument | **Hecho** |
+| 1.6 | **CookbookEvaluator (solo SIMPLE_VECTOR)** | `sandbox_cookbook/evaluator.py` | Pipeline: load -> index con `doc.content` directo **(PC-1)** -> retrieve -> Recall@k -> build_run. **(PC-5)** CSV solo k=5,10,20. Sin generacion | **Hecho** |
+| 1.7 | **Entry point** | `sandbox_cookbook/run.py` | `--strategy`, `--dry-run`, `--env`, `-v` | **Hecho** |
+| 1.8 | **Tests loader** | `tests/test_cookbook_loader.py` | Parseo JSON, golden chunks validados, parent_documents en metadata, title=None (19 tests) | **Hecho** |
+| 1.9 | **Tests config** | `tests/test_cookbook_config.py` | from_env(), validate(), summary(), eval_k_values default [5,10,20] (23 tests) | **Hecho** |
+| 1.10 | **Tests evaluator (SIMPLE_VECTOR)** | `tests/test_cookbook_evaluator.py` | Pipeline completo con mocks: load→index→retrieve→evaluate→build_run. Validacion Pass@k content-based assertion (9 tests) | **Hecho** |
+| 1.11 | **`__init__.py`** | `sandbox_cookbook/__init__.py` | Paquete Python valido | **Hecho** |
+| 1.12 | **`env.example`** | `sandbox_cookbook/env.example` | Template con todas las variables de entorno documentadas | **Hecho** |
+| 1.13 | **Registrar dataset en DATASET_CONFIG** | `shared/types.py` | Entrada `"cookbook"` en `DATASET_CONFIG` con `type=RETRIEVAL_ONLY`, `primary_metric=None`, sin generation | **Hecho** |
+| 1.14 | **Verificar tests originales pasan** | `tests/` | 198 tests passed (147 originales + 51 nuevos), 0 fallos, sin regresiones | **Hecho** |
 
 ### Fase 2: Contextual Embeddings (CONTEXTUAL_VECTOR) — Requiere LLM
 **Objetivo:** Enriquecimiento contextual con documento padre. Medir mejora vs baseline.

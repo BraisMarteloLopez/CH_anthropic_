@@ -34,7 +34,7 @@ from shared.types import (
     EmbeddingModelProtocol,
     get_dataset_config,
 )
-from shared.llm import AsyncLLMService, load_embedding_model, run_sync
+from shared.llm import AsyncLLMService, load_embedding_model, run_sync, batch_embed_queries
 from shared.metrics import MetricsCalculator, MetricResult
 from shared.retrieval import get_retriever, RetrievalStrategy
 from shared.retrieval.core import BaseRetriever
@@ -509,87 +509,15 @@ class MTEBEvaluator:
         """
         Embebe todas las queries en batch via REST al NIM de embeddings.
 
-        Usa input_type=query para modelos asimetricos (el NIM distingue
-        entre query y passage). Para modelos simetricos, input_type se omite.
-
-        Returns:
-            Lista de vectores, uno por query. Si falla, retorna lista vacia
-            y el caller debe hacer fallback a retrieval sin pre-embed.
+        Delega a shared/llm.py batch_embed_queries() (PC-4).
         """
-        import json
-        import urllib.request
-
-        n = len(query_texts)
-        batch_size = self.config.infra.embedding_batch_size or 5
-        base_url = self.config.infra.embedding_base_url.rstrip("/")
-        model_name = self.config.infra.embedding_model_name
-        model_type = self.config.infra.embedding_model_type
-        url = f"{base_url}/embeddings"
-
-        all_vectors: List[List[float]] = []
-
-        logger.info(
-            f"  Pre-embedding {n} queries (batch={batch_size}, "
-            f"type={model_type})..."
+        return batch_embed_queries(
+            query_texts=query_texts,
+            base_url=self.config.infra.embedding_base_url,
+            model_name=self.config.infra.embedding_model_name,
+            model_type=self.config.infra.embedding_model_type,
+            batch_size=self.config.infra.embedding_batch_size,
         )
-        t0 = time.time()
-
-        for batch_start in range(0, n, batch_size):
-            batch = query_texts[batch_start : batch_start + batch_size]
-
-            payload: Dict[str, Any] = {
-                "input": batch,
-                "model": model_name,
-            }
-            # Modelos asimetricos requieren input_type
-            if model_type == "asymmetric":
-                payload["input_type"] = "query"
-
-            # FIX DTm-6: retry por batch antes de abandonar todo el pre-embed.
-            max_retries = 2
-            for attempt in range(max_retries + 1):
-                try:
-                    body = json.dumps(payload).encode("utf-8")
-                    req = urllib.request.Request(
-                        url, data=body, method="POST",
-                        headers={"Content-Type": "application/json"},
-                    )
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-
-                    # Ordenar por index (la API puede devolver desordenado)
-                    items = sorted(data["data"], key=lambda x: x["index"])
-                    for item in items:
-                        all_vectors.append(item["embedding"])
-                    break  # batch OK
-
-                except Exception as e:
-                    if attempt < max_retries:
-                        wait = 2 ** attempt
-                        logger.warning(
-                            f"  Batch embed retry {attempt + 1}/{max_retries} "
-                            f"(offset={batch_start}): {e}. "
-                            f"Reintentando en {wait}s..."
-                        )
-                        time.sleep(wait)
-                    else:
-                        logger.warning(
-                            f"  Error en batch embed (offset={batch_start}) "
-                            f"tras {max_retries + 1} intentos: {e}. "
-                            "Fallback a retrieval sin pre-embed."
-                        )
-                        return []
-
-            batch_end = batch_start + len(batch)
-            if batch_end % 500 == 0 or batch_end == n:
-                logger.info(f"  Queries embebidas: {batch_end}/{n}")
-
-        elapsed = time.time() - t0
-        logger.info(
-            f"  Pre-embedding completado: {n} queries en {elapsed:.1f}s "
-            f"({n / elapsed:.0f} queries/s)"
-        )
-        return all_vectors
 
     # -----------------------------------------------------------------
     # EVALUACION DE QUERIES (PIPELINE ASYNC)

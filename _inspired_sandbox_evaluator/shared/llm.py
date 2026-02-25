@@ -102,7 +102,7 @@ class LLMMetrics:
 # HELPER: ejecutar coroutine de forma segura
 # =============================================================================
 
-from typing import Any, Coroutine, TypeVar
+from typing import Any, Coroutine, Dict, List, TypeVar
 
 _T = TypeVar("_T")
 
@@ -356,6 +356,101 @@ def load_embedding_model(
         )
 
 
+def batch_embed_queries(
+    query_texts: List[str],
+    base_url: str,
+    model_name: str,
+    model_type: str = "symmetric",
+    batch_size: int = 50,
+) -> List[List[float]]:
+    """
+    Embebe queries en batch via REST al NIM de embeddings.
+
+    Extraido de MTEBEvaluator._batch_embed_queries() (PC-4) para
+    reutilizacion por cualquier sandbox.
+
+    Args:
+        query_texts: Textos de queries a embeber.
+        base_url: URL base del servidor NIM embeddings.
+        model_name: Nombre del modelo de embedding.
+        model_type: "symmetric" o "asymmetric".
+        batch_size: Tamano de batch para REST calls.
+
+    Returns:
+        Lista de vectores, uno por query. Lista vacia si falla.
+    """
+    import json
+    import urllib.request
+
+    n = len(query_texts)
+    if n == 0:
+        return []
+
+    batch_size = batch_size or 5
+    url = f"{base_url.rstrip('/')}/embeddings"
+    all_vectors: List[List[float]] = []
+
+    logger.info(
+        f"  Pre-embedding {n} queries (batch={batch_size}, "
+        f"type={model_type})..."
+    )
+    t0 = time.time()
+
+    for batch_start in range(0, n, batch_size):
+        batch = query_texts[batch_start : batch_start + batch_size]
+
+        payload: Dict[str, Any] = {
+            "input": batch,
+            "model": model_name,
+        }
+        if model_type == "asymmetric":
+            payload["input_type"] = "query"
+
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                body = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=body, method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+
+                items = sorted(data["data"], key=lambda x: x["index"])
+                for item in items:
+                    all_vectors.append(item["embedding"])
+                break
+
+            except Exception as e:
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        f"  Batch embed retry {attempt + 1}/{max_retries} "
+                        f"(offset={batch_start}): {e}. "
+                        f"Reintentando en {wait}s..."
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        f"  Error en batch embed (offset={batch_start}) "
+                        f"tras {max_retries + 1} intentos: {e}. "
+                        "Fallback a retrieval sin pre-embed."
+                    )
+                    return []
+
+        batch_end = batch_start + len(batch)
+        if batch_end % 500 == 0 or batch_end == n:
+            logger.info(f"  Queries embebidas: {batch_end}/{n}")
+
+    elapsed = time.time() - t0
+    logger.info(
+        f"  Pre-embedding completado: {n} queries en {elapsed:.1f}s "
+        f"({n / elapsed:.0f} queries/s)"
+    )
+    return all_vectors
+
+
 __all__ = [
     "AsyncLLMService",
     "LLMMetrics",
@@ -363,4 +458,5 @@ __all__ = [
     "run_sync",
     "load_embedding_model",
     "HAS_NVIDIA_EMBEDDINGS",
+    "batch_embed_queries",
 ]

@@ -529,8 +529,14 @@ DATASET_CONFIG: Dict[str, Dict[str, Any]] = {
         "answer_field": "answer",
         "description": "Preguntas multi-hop que requieren conectar multiples hechos",
     },
-    # Datasets adicionales: agregar aqui cuando tengan ETL ejecutado y datos en MinIO.
-    # get_dataset_config() devuelve defaults razonables para datasets no registrados.
+    "cookbook": {
+        "type": DatasetType.RETRIEVAL_ONLY,
+        "primary_metric": None,
+        "secondary_metrics": [],
+        "has_supporting_facts": False,
+        "answer_field": None,
+        "description": "Contextual Retrieval codebase chunks (Anthropic cookbook). 90 docs, 737 chunks, 248 queries. Solo Pass@k.",
+    },
 }
 
 

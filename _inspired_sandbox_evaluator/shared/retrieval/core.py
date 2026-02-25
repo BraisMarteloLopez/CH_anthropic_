@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 class RetrievalStrategy(Enum):
     """Estrategias de retrieval disponibles."""
     SIMPLE_VECTOR = auto()
+    CONTEXTUAL_VECTOR = auto()
     CONTEXTUAL_HYBRID = auto()
+    CONTEXTUAL_HYBRID_RERANK = auto()
 
 
 # =============================================================================
@@ -92,6 +94,7 @@ class RetrievalResult:
 
     bm25_scores: Optional[List[float]] = None
     vector_scores: Optional[List[float]] = None
+    enriched_contents: Optional[List[str]] = None
 
     retrieval_time_ms: float = 0.0
     strategy_used: RetrievalStrategy = RetrievalStrategy.SIMPLE_VECTOR
