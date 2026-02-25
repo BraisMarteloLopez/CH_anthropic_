@@ -1,14 +1,5 @@
 """
-Modulo: Shared Types
-Descripcion: Estructuras de datos normalizadas para evaluacion RAG.
-
-Ubicacion: shared/types.py
-
-Cambios respecto a la version original:
-  - EvaluationRun (plano) reemplaza GlobalEvaluationReport (matrix multi-modelo)
-  - LoadedDataset usa Dict index para queries (O(1) lookup vs O(n))
-  - NormalizedDocument sin parent_content (eso vive en sandbox_anthropic)
-  - Eliminado DatasetEvaluationResult (redundante con EvaluationRun)
+Estructuras de datos normalizadas para evaluacion RAG.
 """
 
 from __future__ import annotations
@@ -104,13 +95,7 @@ class NormalizedQuery:
 
 @dataclass
 class NormalizedDocument:
-    """
-    Representacion normalizada de un documento/chunk del corpus.
-
-    Este tipo base NO contiene parent_content. Para Contextual Retrieval
-    (Anthropic), usar ContextualDocument en sandbox_anthropic que hereda
-    de este y agrega parent_content.
-    """
+    """Representacion normalizada de un documento/chunk del corpus."""
     doc_id: str
     content: str
     title: Optional[str] = None
@@ -333,16 +318,6 @@ class QueryRetrievalDetail:
 
 
 @dataclass
-class GenerationResult:
-    """Resultado de generacion para una query."""
-    generated_response: str
-    generation_time_ms: float = 0.0
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    model_name: str = "unknown"
-
-
-@dataclass
 class QueryEvaluationResult:
     """Resultado completo de evaluacion para una query individual."""
     query_id: str
@@ -350,7 +325,7 @@ class QueryEvaluationResult:
     dataset_name: str
     dataset_type: DatasetType
     retrieval: QueryRetrievalDetail
-    generation: Optional[GenerationResult] = None
+    generation: Optional[Any] = None
     expected_response: Optional[str] = None
     primary_metric_type: MetricType = MetricType.F1_SCORE
     primary_metric_value: float = 0.0
@@ -459,9 +434,7 @@ class EvaluationRun:
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
 
-    # NOTE: calculate_aggregates() eliminado (v3.2 cleanup).
-    # La agregacion se hace en MTEBEvaluator._build_run(), que es el unico
-    # punto de construccion de EvaluationRun. No habia callers de este metodo.
+    # Agregacion se hace en el evaluator (CookbookEvaluator._build_run).
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializacion sin detalle de queries."""
@@ -517,51 +490,6 @@ class EvaluationRun:
 
 
 # =============================================================================
-# CONFIGURACION DE DATASETS
-# =============================================================================
-
-DATASET_CONFIG: Dict[str, Dict[str, Any]] = {
-    "hotpotqa": {
-        "type": DatasetType.HYBRID,
-        "primary_metric": MetricType.F1_SCORE,
-        "secondary_metrics": [MetricType.EXACT_MATCH, MetricType.FAITHFULNESS],
-        "has_supporting_facts": True,
-        "answer_field": "answer",
-        "description": "Preguntas multi-hop que requieren conectar multiples hechos",
-    },
-    "cookbook": {
-        "type": DatasetType.RETRIEVAL_ONLY,
-        "primary_metric": None,
-        "secondary_metrics": [],
-        "has_supporting_facts": False,
-        "answer_field": None,
-        "description": "Contextual Retrieval codebase chunks (Anthropic cookbook). 90 docs, 737 chunks, 248 queries. Solo Pass@k.",
-    },
-}
-
-
-def get_dataset_config(dataset_name: str) -> Dict[str, Any]:
-    """Obtiene la configuracion para un dataset especifico."""
-    normalized_name = dataset_name.lower().replace("-", "").replace("_", "")
-
-    for key, config in DATASET_CONFIG.items():
-        if key.replace("-", "").replace("_", "") == normalized_name:
-            return config
-
-    logger.warning(
-        f"Dataset '{dataset_name}' sin configuracion predefinida. Usando defaults."
-    )
-    return {
-        "type": DatasetType.RETRIEVAL_ONLY,
-        "primary_metric": MetricType.FAITHFULNESS,
-        "secondary_metrics": [MetricType.ANSWER_RELEVANCE],
-        "has_supporting_facts": False,
-        "answer_field": None,
-        "description": "Dataset sin configuracion predefinida",
-    }
-
-
-# =============================================================================
 # PROTOCOLOS
 # =============================================================================
 
@@ -605,11 +533,8 @@ __all__ = [
     "NormalizedDocument",
     "LoadedDataset",
     "QueryRetrievalDetail",
-    "GenerationResult",
     "QueryEvaluationResult",
     "EvaluationRun",
-    "DATASET_CONFIG",
-    "get_dataset_config",
     "LLMJudgeProtocol",
     "EmbeddingModelProtocol",
 ]
