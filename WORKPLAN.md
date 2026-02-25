@@ -26,8 +26,11 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 | # | Tarea | Criterio de aceptacion | Estado |
 |---|---|---|---|
 | 0.1 | Verificar 162 tests existentes pasan | `pytest tests/` sin fallos | Pendiente |
-| 0.2 | Obtener dataset (codebase_chunks.json + evaluation_set.jsonl) | Archivos parseables en `sandbox_cookbook/data/` | Pendiente |
+| 0.2 | Obtener dataset del cookbook de Anthropic | Archivos parseables en `sandbox_cookbook/data/` | Pendiente |
 | 0.3 | **(PC-6)** Agregar `sandbox_cookbook/data/` a `.gitignore` | Archivos de datos no se comitean | Pendiente |
+
+**Detalle tarea 0.2 — Fuente del dataset:**
+El dataset se obtiene del propio cookbook de Anthropic. Los archivos son `codebase_chunks.json` (9 codebases, 737 chunks) y `evaluation_set.jsonl` (248 queries con golden_chunk_uuids). Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO ni Parquet — el sistema de carga replica exactamente el del cookbook de Anthropic (lectura directa de JSON/JSONL local).
 
 ### Fase 1: Infraestructura Base (SIMPLE_VECTOR) — Sin LLM
 **Objetivo:** Baseline de retrieval vectorial puro. Verificar Pass@k ~80-87%.
@@ -42,7 +45,12 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 | 1.6 | **CookbookEvaluator (solo SIMPLE_VECTOR)** | `sandbox_cookbook/evaluator.py` | Pipeline: load -> index con `doc.content` directo **(PC-1)** -> retrieve -> Recall@k -> build_run. **(PC-5)** CSV solo k=5,10,20. Sin generacion | Pendiente |
 | 1.7 | **Entry point** | `sandbox_cookbook/run.py` | `--strategy`, `--dry-run`, `--env`, `-v` | Pendiente |
 | 1.8 | **Tests loader** | `tests/test_cookbook_loader.py` | Parseo JSON, golden chunks validados, parent_documents en metadata, title=None | Pendiente |
-| 1.9 | **Verificar 162 tests originales pasan** | `tests/` | Sin regresiones en shared/ | Pendiente |
+| 1.9 | **Tests config** | `tests/test_cookbook_config.py` | from_env(), validate(), summary(), eval_k_values default [5,10,20] | Pendiente |
+| 1.10 | **Tests evaluator (SIMPLE_VECTOR)** | `tests/test_cookbook_evaluator.py` | Pipeline completo con mocks: load→index→retrieve→evaluate→build_run. Validacion Pass@k content-based assertion | Pendiente |
+| 1.11 | **`__init__.py`** | `sandbox_cookbook/__init__.py` | Paquete Python valido | Pendiente |
+| 1.12 | **`env.example`** | `sandbox_cookbook/env.example` | Template con todas las variables de entorno documentadas | Pendiente |
+| 1.13 | **Registrar dataset en DATASET_CONFIG** | `shared/types.py` | Entrada `"cookbook"` en `DATASET_CONFIG` con `type=RETRIEVAL_ONLY`, `primary_metric=None`, sin generation | Pendiente |
+| 1.14 | **Verificar 162 tests originales pasan** | `tests/` | Sin regresiones en shared/ | Pendiente |
 
 ### Fase 2: Contextual Embeddings (CONTEXTUAL_VECTOR) — Requiere LLM
 **Objetivo:** Enriquecimiento contextual con documento padre. Medir mejora vs baseline.
@@ -50,7 +58,7 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
 | 2.1 | **(PC-2)** **Truncation limits configurables** | `shared/retrieval/contextual_retriever.py` | `max_parent_chars: int = 2000`, `max_chunk_chars: int = 1000`. Cookbook: 32000/8000 | Pendiente |
-| 2.2 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | Parametros: `mode`, `document_prompt_template`, `chunk_prompt_template`, `context_position`. Defaults preservan sandbox_mteb | Pendiente |
+| 2.2 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | Parametros: `mode`, `document_prompt_template`, `chunk_prompt_template`, `context_position`. Defaults preservan sandbox_mteb. `context_position` controla combinacion en `_build_enriched_text()` del generator; `EnrichedChunk.get_enriched_text()` se mantiene (backwards-compat, siempre "prepend") | Pendiente |
 | 2.3 | **Prompts Anthropic (XML tags)** | `shared/retrieval/contextual_retriever.py` | Constantes `ANTHROPIC_DOCUMENT_PROMPT` y `ANTHROPIC_CHUNK_PROMPT` con `<document>` y `<chunk>` tags | Pendiente |
 | 2.4 | **(PC-3)** **Fix strategy hardcodeada** | `shared/retrieval/contextual_retriever.py` | `result.strategy_used = self.config.strategy` en vez de hardcode `CONTEXTUAL_HYBRID` | Pendiente |
 | 2.5 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | `result.enriched_contents = list(result.contents)` antes del swap a originales | Pendiente |
@@ -82,7 +90,7 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 5.1 | **Modo --compare-all** | `sandbox_cookbook/run.py` | Ejecuta 4 estrategias secuencialmente | Pendiente |
+| 5.1 | **Modo --compare-all** | `sandbox_cookbook/run.py` | Ejecuta 4 estrategias secuencialmente. Cache persistente (tarea 2.6) compartido entre estrategias: contextos generados en CONTEXTUAL_VECTOR se reutilizan en CONTEXTUAL_HYBRID y CONTEXTUAL_HYBRID_RERANK sin regenerar | Pendiente |
 | 5.2 | **comparison.csv** | `sandbox_cookbook/evaluator.py` | strategy, pass_at_5/10/20, failure_rate_reduction_vs_baseline | Pendiente |
 
 ### Fase 6: Validacion Final
@@ -112,7 +120,7 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 
 ### No se implementa (descartado)
 
-- Clase RetrievalMetrics con pass_at_k() — Recall@k ya existe
+- Clase `RetrievalMetrics` como modulo independiente — Recall@k ya existe en `QueryRetrievalDetail`. Pass@k = Recall@k algebraicamente. Content-based matching se implementa como assertion de validacion dentro del CookbookEvaluator (no como metrica separada). Ver DESIGN seccion 4.6
 - Pipeline de generacion LLM — Anthropic no la usa en el cookbook
 - Metricas de generacion (F1, EM, Accuracy) — No aplican
 - Metricas LLM-judge (Faithfulness, Answer Relevance, Context Utilization) — No aplican
@@ -121,3 +129,4 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 - Exporter generico extendido — CSV minimalista directo en evaluator
 - Title en NormalizedDocument para chunks de codigo — Contamina embeddings (PC-1)
 - Truncamiento fijo 2000/1000 chars — Destruye approach Anthropic (PC-2)
+- Sistema de carga MinIO/Parquet para cookbook — Se replica el sistema del cookbook Anthropic (JSON/JSONL local)

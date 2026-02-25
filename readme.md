@@ -32,9 +32,21 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y como red 
 
 ## Decisiones clave
 
-### Pass@k = Recall@k
+### Dataset: replica exacta del cookbook de Anthropic
 
-Pass@k del cookbook y Recall@k del sandbox existente son **algebraicamente identicas**: `|relevantes en top-k| / |total relevantes|`. No se implementa metrica nueva. Se reutiliza `recall_at_k` de `QueryRetrievalDetail` y se renombra en CSV.
+El sistema de carga de datos **NO** replica el patron MinIO/Parquet de sandbox_mteb. Se replica el sistema del cookbook de Anthropic:
+
+- **Fuente:** Dos archivos del cookbook de Anthropic: `codebase_chunks.json` (9 codebases, 737 chunks) y `evaluation_set.jsonl` (248 queries con `golden_chunk_uuids`).
+- **Carga:** Lectura directa de JSON/JSONL local. Sin MinIO, sin Parquet, sin ETL.
+- **Ubicacion:** `sandbox_cookbook/data/` (excluido de git via `.gitignore`).
+- **CookbookLoader:** Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids mapeados a `relevant_doc_ids`. Valida que cada golden chunk existe en el corpus.
+
+### Pass@k = Recall@k (con validacion por contenido)
+
+Pass@k del cookbook y Recall@k del sandbox existente son **algebraicamente identicas**: `|relevantes en top-k| / |total relevantes|`. No se implementa clase `RetrievalMetrics` nueva.
+
+- **Metrica primaria (ID-based):** Se reutiliza `recall_at_k` de `QueryRetrievalDetail`. El CookbookLoader mapea `golden_chunk_uuids` a los mismos `doc_id` compuestos del corpus (`uuid__chunk_index`). Se renombra a `pass_at_k` en CSV.
+- **Validacion (content-based):** El CookbookEvaluator ejecuta un assertion que compara matching por ID vs matching por contenido exacto. Si divergen, aborta con error (indica bug en el mapeo de IDs del loader). No es una metrica separada, es una guardia de calidad.
 
 ### Solo metricas del paper
 
@@ -43,6 +55,14 @@ Se descartan: Hit@k, MRR, NDCG@k, F1, EM, Accuracy, Faithfulness, Answer Relevan
 ### Dataset incompatible con HotpotQA
 
 El dataset del cookbook tiene estructura jerarquica (documento padre -> chunks) vs plana (HotpotQA). El loader y evaluator se escriben desde cero. La capa `shared/` (~70% del codigo util) se reutiliza intacta.
+
+### context_position: parametrizable en LLMContextGenerator
+
+El blog de Anthropic prepone el contexto (`context + chunk`), el cookbook lo apone (`chunk + context`). La posicion se parametriza en `LLMContextGenerator.__init__(context_position="prepend"|"append")`. La combinacion se resuelve en el generator via `_build_enriched_text()`. `EnrichedChunk.get_enriched_text()` se mantiene sin cambios (siempre "prepend") para backwards-compatibility con sandbox_mteb.
+
+### Cache persistente compartido en --compare-all
+
+El modo `--compare-all` ejecuta 4 estrategias secuencialmente. Las estrategias 2, 3 y 4 generan los mismos 737 contextos (mismo modelo, mismo prompt). El cache persistente en disco (JSON con invalidacion por hash modelo+prompt) se instancia una vez y se comparte entre las 3 estrategias contextuales, evitando regenerar contextos.
 
 ### Correcciones sobre el diseno original (puntos ciegos)
 
@@ -57,8 +77,8 @@ El dataset del cookbook tiene estructura jerarquica (documento padre -> chunks) 
 
 ## Documentacion
 
-- [`DESIGN_sandbox_cookbook.md`](DESIGN_sandbox_cookbook.md) — Diseno propuesto (evaluado y aprobado)
-- [`WORKPLAN.md`](WORKPLAN.md) — Plan de trabajo con 6 fases, ~30 tareas, estado de cada una
+- [`DESIGN_sandbox_cookbook.md`](DESIGN_sandbox_cookbook.md) — Diseno tecnico detallado (revisado, inconsistencias corregidas)
+- [`WORKPLAN.md`](WORKPLAN.md) — Plan de trabajo con 6 fases, ~35 tareas, estado de cada una
 - [`_inspired_sandbox_evaluator/README.md`](_inspired_sandbox_evaluator/README.md) — Documentacion del sistema RAG_P v3.2
 - [`_inspired_sandbox_evaluator/README_TEST.md`](_inspired_sandbox_evaluator/README_TEST.md) — Infraestructura de tests
 

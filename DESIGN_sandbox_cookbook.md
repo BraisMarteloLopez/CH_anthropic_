@@ -278,12 +278,20 @@ Los prompts actuales de RAG_P (plain text headers) se mantienen como opcion para
 
 **d) context_position parametrizable:**
 
+La logica de combinacion contexto+original se mueve a `LLMContextGenerator`, que recibe `context_position` en constructor. `EnrichedChunk.get_enriched_text()` existente (que hardcodea "prepend") se reemplaza: `generate_contexts_batch()` almacena directamente el texto combinado en `generated_context` segun la posicion configurada. `ContextualRetriever.index_documents()` usa `chunk.generated_context + "\n\n" + chunk.original_content` sin cambios — la combinacion ya esta resuelta.
+
 ```python
-def _build_enriched_text(self, context: str, original: str) -> str:
-    if self.context_position == "prepend":
-        return f"{context}\n\n{original}"      # blog de Anthropic
-    return f"{original}\n\n{context}"           # cookbook de Anthropic
+class LLMContextGenerator:
+    def __init__(self, ..., context_position: str = "prepend"):
+        self.context_position = context_position
+
+    def _build_enriched_text(self, context: str, original: str) -> str:
+        if self.context_position == "prepend":
+            return f"{context}\n\n{original}"      # blog de Anthropic
+        return f"{original}\n\n{context}"           # cookbook de Anthropic
 ```
+
+**Nota:** `EnrichedChunk.get_enriched_text()` se mantiene por backwards-compatibility con sandbox_mteb (siempre "prepend"). El CookbookEvaluator usa `_build_enriched_text()` del generator directamente.
 
 **e) Exponer enriched_contents para reranking:**
 
@@ -311,8 +319,8 @@ CookbookEvaluator._index_documents(dataset, corpus)
   -> documents = [
          {
              "doc_id": doc.doc_id,
-             "content": doc.get_full_text(),
-             "title": doc.title,
+             "content": doc.content,            # (PC-1) SIN get_full_text(), sin title
+             "title": None,                     # chunks de codigo: title contamina embedding
              "parent_content": parent_docs[doc.metadata["parent_doc_id"]],
          }
          for doc in corpus.values()
@@ -390,29 +398,30 @@ if self.config.strategy == "CONTEXTUAL_HYBRID_RERANK":
 
 ### 4.6 Pass@k como metrica
 
-Se agrega a `shared/metrics.py`:
+**Resolucion:** Pass@k = Recall@k algebraicamente. No se crea clase `RetrievalMetrics` nueva.
+
+**Metrica primaria (ID-based):** Se reutiliza `QueryRetrievalDetail.recall_at_k` existente. El CookbookLoader mapea `golden_chunk_uuids` a los mismos `doc_id` compuestos usados en el corpus (`uuid__chunk_index`). El set intersection de `recall_at_k` produce el mismo resultado que Pass@k.
+
+**Validacion (content-based):** Como aseguramiento de calidad, el CookbookEvaluator ejecuta una validacion content-based en su pipeline para confirmar que el mapeo de IDs es correcto. Esta validacion NO es una metrica separada — es un assertion que aborta si detecta divergencia:
 
 ```python
-class RetrievalMetrics:
-    @staticmethod
-    def pass_at_k(
-        retrieved_contents: List[str],
-        golden_contents: List[str],
-        k: int,
-    ) -> float:
-        """
-        Fraccion de golden chunks encontrados en top-k resultados.
-        Matching por contenido exacto (strip + compare).
-        """
-        found = 0
-        for golden in golden_contents:
-            golden_stripped = golden.strip()
-            for retrieved in retrieved_contents[:k]:
-                if retrieved.strip() == golden_stripped:
-                    found += 1
-                    break
-        return found / len(golden_contents) if golden_contents else 0.0
+# En CookbookEvaluator._validate_pass_at_k():
+def _validate_pass_at_k(self, retrieval: QueryRetrievalDetail,
+                         golden_contents: List[str], k: int) -> None:
+    """Assertion: ID-matching y content-matching producen mismo resultado."""
+    id_based = retrieval.recall_at_k.get(k, 0.0)
+    # Content-based check
+    found = sum(
+        1 for gc in golden_contents
+        if gc.strip() in {rc.strip() for rc in retrieval.retrieved_contents[:k]}
+    )
+    content_based = found / len(golden_contents) if golden_contents else 0.0
+    assert abs(id_based - content_based) < 1e-9, (
+        f"Pass@k diverge: id_based={id_based}, content_based={content_based}"
+    )
 ```
+
+En CSV se reporta como `pass_at_k` (renombre de `recall_at_k`).
 
 ### 4.7 Cache de contextos
 
