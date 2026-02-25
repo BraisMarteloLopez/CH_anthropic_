@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 5 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **COMPLETO** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -102,9 +102,9 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Detalle | Estado |
 |---|---|---|---|
-| 6.1 | Suite completa de tests | Todos pasan (existentes + nuevos) | Pendiente |
-| 6.2 | Verificar mypy | Sin errores en modulos nuevos | Pendiente |
-| 6.3 | Marcar DT-2 como resuelta | Mode A implementado | Pendiente |
+| 6.1 | Suite completa de tests | 253 passed, 1 skipped, 0 failures (147 originales + 106 nuevos) | **Hecho** |
+| 6.2 | Verificar mypy | 0 errores en sandbox_cookbook/ (30 pre-existentes en shared/ no tocados) | **Hecho** |
+| 6.3 | Marcar DT-2 como resuelta | Mode A ("document") implementado en LLMContextGenerator con prompts Anthropic XML | **Hecho** |
 
 ---
 

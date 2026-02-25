@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.types import (
     DatasetType,
+    EmbeddingModelProtocol,
     EvaluationRun,
     EvaluationStatus,
     LoadedDataset,
@@ -74,8 +75,8 @@ class CookbookEvaluator:
 
     def __init__(self, config: CookbookConfig):
         self.config = config
-        self._embedding_model = None
-        self._llm_service = None
+        self._embedding_model: Optional[EmbeddingModelProtocol] = None
+        self._llm_service: Optional[AsyncLLMService] = None
         self._reranker: Optional[CrossEncoderReranker] = None
         self._retriever: Optional[BaseRetriever] = None
         self._context_cache: Optional[ContextCache] = None
@@ -196,6 +197,12 @@ class CookbookEvaluator:
         strategy = self.config.get_strategy()
         parent_docs = dataset.metadata.get("parent_documents", {})
 
+        # Type narrowing: _init_components() garantiza estos valores
+        assert self._embedding_model is not None, (
+            "_init_components() must be called before _index_documents()"
+        )
+        embedding_model = self._embedding_model
+
         retrieval_config = RetrievalConfig(
             strategy=strategy,
             retrieval_k=max(self.config.eval_k_values),
@@ -207,12 +214,15 @@ class CookbookEvaluator:
         if strategy == RetrievalStrategy.SIMPLE_VECTOR:
             self._retriever = SimpleVectorRetriever(
                 config=retrieval_config,
-                embedding_model=self._embedding_model,
+                embedding_model=embedding_model,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
 
         elif strategy == RetrievalStrategy.CONTEXTUAL_VECTOR:
+            assert self._llm_service is not None, (
+                "LLM service required for contextual strategies"
+            )
             context_generator = LLMContextGenerator(
                 llm_service=self._llm_service,
                 max_tokens=self.config.contextualize_max_tokens,
@@ -228,17 +238,17 @@ class CookbookEvaluator:
             # Cargar cache persistente si configurado
             self._load_context_cache(context_generator)
 
-            inner = SimpleVectorRetriever(
+            inner_vector = SimpleVectorRetriever(
                 config=retrieval_config,
-                embedding_model=self._embedding_model,
+                embedding_model=embedding_model,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
             self._retriever = ContextualRetriever(
                 config=retrieval_config,
-                embedding_model=self._embedding_model,
+                embedding_model=embedding_model,
                 context_generator=context_generator,
-                inner_retriever=inner,
+                inner_retriever=inner_vector,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
@@ -247,6 +257,9 @@ class CookbookEvaluator:
             RetrievalStrategy.CONTEXTUAL_HYBRID,
             RetrievalStrategy.CONTEXTUAL_HYBRID_RERANK,
         ):
+            assert self._llm_service is not None, (
+                "LLM service required for contextual strategies"
+            )
             context_generator = LLMContextGenerator(
                 llm_service=self._llm_service,
                 max_tokens=self.config.contextualize_max_tokens,
@@ -282,17 +295,17 @@ class CookbookEvaluator:
                 rrf_formula="cookbook",
             )
 
-            inner = HybridRetriever(
+            inner_hybrid = HybridRetriever(
                 config=hybrid_config,
-                embedding_model=self._embedding_model,
+                embedding_model=embedding_model,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
             self._retriever = ContextualRetriever(
                 config=hybrid_config,
-                embedding_model=self._embedding_model,
+                embedding_model=embedding_model,
                 context_generator=context_generator,
-                inner_retriever=inner,
+                inner_retriever=inner_hybrid,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
@@ -397,6 +410,10 @@ class CookbookEvaluator:
             )
 
         # Determine retrieval k (over-sample for reranking)
+        assert self._retriever is not None, (
+            "_index_documents() must be called before _evaluate_queries()"
+        )
+
         is_rerank = self.config.strategy == "CONTEXTUAL_HYBRID_RERANK"
         if is_rerank:
             k_retrieve = (
@@ -466,6 +483,8 @@ class CookbookEvaluator:
 
         Despues del reranking, restaura contents originales en el resultado.
         """
+        assert self._reranker is not None
+
         # Seleccionar contenido para el reranker
         rerank_content = self.config.rerank_content
         enriched = rr.enriched_contents or rr.contents
