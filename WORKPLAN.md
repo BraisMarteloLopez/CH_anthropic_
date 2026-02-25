@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 4 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 5 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -94,8 +94,8 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 5.1 | **Modo --compare-all** | `sandbox_cookbook/run.py` | Ejecuta 4 estrategias secuencialmente. Cache persistente (tarea 2.6) compartido entre estrategias: contextos generados en CONTEXTUAL_VECTOR se reutilizan en CONTEXTUAL_HYBRID y CONTEXTUAL_HYBRID_RERANK sin regenerar | Pendiente |
-| 5.2 | **comparison.csv** | `sandbox_cookbook/evaluator.py` | strategy, pass_at_5/10/20, failure_rate_reduction_vs_baseline | Pendiente |
+| 5.1 | **Modo --compare-all** | `sandbox_cookbook/run.py` | Ejecuta 4 estrategias secuencialmente. Cache persistente (tarea 2.6) compartido entre estrategias: contextos generados en CONTEXTUAL_VECTOR se reutilizan en CONTEXTUAL_HYBRID y CONTEXTUAL_HYBRID_RERANK sin regenerar | **Hecho** |
+| 5.2 | **comparison.csv** | `sandbox_cookbook/evaluator.py` | strategy, pass_at_5/10/20, failure_rate_reduction_vs_baseline | **Hecho** |
 
 ### Fase 6: Validacion Final
 **Objetivo:** Calidad y cierre.

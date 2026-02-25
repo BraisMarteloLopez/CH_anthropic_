@@ -653,4 +653,67 @@ class CookbookEvaluator:
         logger.info(f"  Detail CSV: {detail_path}")
 
 
-__all__ = ["CookbookEvaluator"]
+def export_comparison_csv(
+    runs: List[EvaluationRun],
+    results_dir: Path,
+    k_values: List[int],
+) -> Path:
+    """
+    Genera comparison.csv con Pass@k y failure rate reduction vs baseline.
+
+    El baseline es SIMPLE_VECTOR (primer run con esa estrategia).
+    failure_rate_reduction = (baseline_failure - current_failure) / baseline_failure * 100
+
+    Args:
+        runs: Lista de EvaluationRun (una por estrategia).
+        results_dir: Directorio donde guardar el CSV.
+        k_values: Lista de k para Pass@k (e.g. [5, 10, 20]).
+
+    Returns:
+        Path al CSV generado.
+    """
+    results_dir.mkdir(parents=True, exist_ok=True)
+    path = results_dir / "comparison.csv"
+
+    # Buscar baseline (SIMPLE_VECTOR)
+    baseline_failure: Dict[int, float] = {}
+    for run in runs:
+        if run.retrieval_strategy == "SIMPLE_VECTOR":
+            for k in k_values:
+                baseline_failure[k] = 1.0 - run.avg_recall_at_k.get(k, 0.0)
+            break
+
+    # Fieldnames
+    fieldnames = ["strategy"]
+    for k in k_values:
+        fieldnames.extend([
+            f"pass_at_{k}",
+            f"failure_rate_at_{k}",
+            f"failure_rate_reduction_at_{k}",
+        ])
+
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for run in runs:
+            row: Dict[str, Any] = {"strategy": run.retrieval_strategy}
+            for k in k_values:
+                pass_at_k = run.avg_recall_at_k.get(k, 0.0)
+                failure_rate = 1.0 - pass_at_k
+                row[f"pass_at_{k}"] = round(pass_at_k, 4)
+                row[f"failure_rate_at_{k}"] = round(failure_rate, 4)
+
+                # Failure rate reduction vs baseline
+                bf = baseline_failure.get(k)
+                if bf and bf > 0:
+                    reduction = (bf - failure_rate) / bf * 100
+                    row[f"failure_rate_reduction_at_{k}"] = round(reduction, 2)
+                else:
+                    row[f"failure_rate_reduction_at_{k}"] = 0.0
+            writer.writerow(row)
+
+    logger.info(f"  Comparison CSV: {path}")
+    return path
+
+
+__all__ = ["CookbookEvaluator", "export_comparison_csv"]

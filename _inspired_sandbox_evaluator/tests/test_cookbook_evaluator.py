@@ -10,6 +10,7 @@ Valida pipeline completo con mocks:
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -655,6 +656,250 @@ class TestCookbookEvaluatorRerank:
         assert any("COOKBOOK_RERANK_CONTENT" in e for e in errors), (
             f"Expected COOKBOOK_RERANK_CONTENT error, got: {errors}"
         )
+
+
+class TestComparisonCsv:
+    """Tests para export_comparison_csv (Fase 5)."""
+
+    def _make_run(self, strategy: str, recall_at_k: Dict[int, float]) -> EvaluationRun:
+        """Helper para crear un EvaluationRun con recall_at_k dado."""
+        return EvaluationRun(
+            run_id=f"test_{strategy}",
+            dataset_name="cookbook",
+            embedding_model="test-model",
+            retrieval_strategy=strategy,
+            config_snapshot={"strategy": strategy},
+            num_queries_total=10,
+            num_queries_evaluated=10,
+            num_queries_failed=0,
+            total_documents=100,
+            avg_recall_at_k=recall_at_k,
+            retrieval_complement_recall_at_k={
+                k: 1.0 - v for k, v in recall_at_k.items()
+            },
+            query_results=[],
+            execution_time_seconds=1.0,
+            status=EvaluationStatus.COMPLETED,
+        )
+
+    def test_comparison_csv_generated(self, tmp_path):
+        """comparison.csv se genera con las columnas correctas."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 0.80, 10: 0.85, 20: 0.90}),
+            self._make_run("CONTEXTUAL_VECTOR", {5: 0.85, 10: 0.90, 20: 0.95}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5, 10, 20])
+
+        assert path.exists()
+        assert path.name == "comparison.csv"
+
+        import csv
+        with open(path) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert len(rows) == 2
+        assert rows[0]["strategy"] == "SIMPLE_VECTOR"
+        assert rows[1]["strategy"] == "CONTEXTUAL_VECTOR"
+
+        # Check all columns present
+        for k in [5, 10, 20]:
+            assert f"pass_at_{k}" in rows[0]
+            assert f"failure_rate_at_{k}" in rows[0]
+            assert f"failure_rate_reduction_at_{k}" in rows[0]
+
+    def test_comparison_csv_pass_at_k_values(self, tmp_path):
+        """Pass@k y failure_rate correctos en CSV."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 0.80, 10: 0.90, 20: 0.95}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5, 10, 20])
+
+        import csv
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+
+        row = rows[0]
+        assert float(row["pass_at_5"]) == 0.80
+        assert float(row["pass_at_10"]) == 0.90
+        assert float(row["pass_at_20"]) == 0.95
+        assert float(row["failure_rate_at_5"]) == 0.20
+        assert float(row["failure_rate_at_10"]) == 0.10
+        assert float(row["failure_rate_at_20"]) == 0.05
+
+    def test_comparison_csv_failure_rate_reduction(self, tmp_path):
+        """failure_rate_reduction calcula correctamente vs baseline."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        # Baseline: failure_rate@5 = 0.20, @10 = 0.10
+        # Contextual: failure_rate@5 = 0.10, @10 = 0.05
+        # Reduction@5 = (0.20 - 0.10) / 0.20 * 100 = 50.0%
+        # Reduction@10 = (0.10 - 0.05) / 0.10 * 100 = 50.0%
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 0.80, 10: 0.90}),
+            self._make_run("CONTEXTUAL_VECTOR", {5: 0.90, 10: 0.95}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5, 10])
+
+        import csv
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+
+        # Baseline has 0% reduction
+        assert float(rows[0]["failure_rate_reduction_at_5"]) == 0.0  # baseline vs itself
+
+        # Wait — baseline_failure@5 = 0.20, baseline_failure@5 = 0.20
+        # reduction = (0.20 - 0.20) / 0.20 * 100 = 0.0 — correct
+
+        # Contextual reduction
+        assert float(rows[1]["failure_rate_reduction_at_5"]) == 50.0
+        assert float(rows[1]["failure_rate_reduction_at_10"]) == 50.0
+
+    def test_comparison_csv_baseline_zero_failure(self, tmp_path):
+        """Si baseline tiene 0% failure, reduction es 0 (no divide por cero)."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 1.0}),  # 0% failure
+            self._make_run("CONTEXTUAL_VECTOR", {5: 1.0}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5])
+
+        import csv
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+
+        # No division por cero
+        assert float(rows[1]["failure_rate_reduction_at_5"]) == 0.0
+
+    def test_comparison_csv_no_baseline(self, tmp_path):
+        """Si no hay SIMPLE_VECTOR, reduction es 0."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        runs = [
+            self._make_run("CONTEXTUAL_VECTOR", {5: 0.90}),
+            self._make_run("CONTEXTUAL_HYBRID", {5: 0.95}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5])
+
+        import csv
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+
+        assert float(rows[0]["failure_rate_reduction_at_5"]) == 0.0
+        assert float(rows[1]["failure_rate_reduction_at_5"]) == 0.0
+
+    def test_comparison_csv_four_strategies(self, tmp_path):
+        """Comparison con las 4 estrategias genera 4 filas."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 0.80, 10: 0.87, 20: 0.90}),
+            self._make_run("CONTEXTUAL_VECTOR", {5: 0.85, 10: 0.90, 20: 0.95}),
+            self._make_run("CONTEXTUAL_HYBRID", {5: 0.90, 10: 0.93, 20: 0.97}),
+            self._make_run("CONTEXTUAL_HYBRID_RERANK", {5: 0.95, 10: 0.96, 20: 0.98}),
+        ]
+
+        path = export_comparison_csv(runs, tmp_path, [5, 10, 20])
+
+        import csv
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+
+        assert len(rows) == 4
+        strategies = [r["strategy"] for r in rows]
+        assert strategies == [
+            "SIMPLE_VECTOR",
+            "CONTEXTUAL_VECTOR",
+            "CONTEXTUAL_HYBRID",
+            "CONTEXTUAL_HYBRID_RERANK",
+        ]
+
+        # Verify reduction increases with each strategy
+        r5_values = [float(r["failure_rate_reduction_at_5"]) for r in rows]
+        assert r5_values[0] == 0.0  # baseline
+        assert r5_values[1] > 0  # better than baseline
+        assert r5_values[2] > r5_values[1]  # even better
+        assert r5_values[3] > r5_values[2]  # best
+
+    def test_comparison_csv_creates_directory(self, tmp_path):
+        """export_comparison_csv crea directorio si no existe."""
+        from sandbox_cookbook.evaluator import export_comparison_csv
+
+        deep_dir = tmp_path / "a" / "b" / "c"
+        runs = [
+            self._make_run("SIMPLE_VECTOR", {5: 0.80}),
+            self._make_run("CONTEXTUAL_VECTOR", {5: 0.90}),
+        ]
+
+        path = export_comparison_csv(runs, deep_dir, [5])
+        assert path.exists()
+        assert path.parent == deep_dir
+
+
+class TestRunCompareAll:
+    """Tests para run_compare_all (Fase 5)."""
+
+    def test_compare_all_dry_run(self, tmp_path, capsys):
+        """--compare-all --dry-run valida configs sin ejecutar."""
+        from sandbox_cookbook.run import run_compare_all
+
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            results_dir=tmp_path / "results",
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+
+        result = run_compare_all(config, dry_run=True)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "COMPARE-ALL: Dry Run" in captured.out
+        assert "SIMPLE_VECTOR" in captured.out
+        # Contextual strategies need LLM, so they'll show SKIP
+        assert "CONTEXTUAL_VECTOR" in captured.out
+
+    def test_compare_all_sets_shared_cache(self, tmp_path):
+        """--compare-all establece cache path compartido automaticamente."""
+        from sandbox_cookbook.run import run_compare_all
+
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            results_dir=tmp_path / "results",
+            contexts_cache_path=None,  # No cache configured
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+
+        # Dry run to check cache is set without running evaluations
+        run_compare_all(config, dry_run=True)
+
+        # Original config not mutated (replace creates new)
+        assert config.contexts_cache_path is None
+
+    def test_compare_all_strategy_and_compare_mutually_exclusive(self):
+        """--strategy y --compare-all son mutuamente exclusivos."""
+        from sandbox_cookbook.run import parse_args
+
+        with pytest.raises(SystemExit):
+            sys.argv = [
+                "run.py",
+                "--strategy", "SIMPLE_VECTOR",
+                "--compare-all",
+            ]
+            parse_args()
 
 
 class TestCookbookEvaluatorIndexing:
