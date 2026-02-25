@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 3 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 4 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -86,8 +86,8 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 4.1 | **Reranking en evaluator** | `sandbox_cookbook/evaluator.py` | Over-sample + seleccion contenido + CrossEncoderReranker + truncar | Pendiente |
-| 4.2 | **Factory CONTEXTUAL_HYBRID_RERANK** | `shared/retrieval/__init__.py` | Misma creacion que CONTEXTUAL_HYBRID (reranking en evaluator) | Pendiente |
+| 4.1 | **Reranking en evaluator** | `sandbox_cookbook/evaluator.py` | Over-sample + seleccion contenido + CrossEncoderReranker + truncar | **Hecho** |
+| 4.2 | **Factory CONTEXTUAL_HYBRID_RERANK** | `shared/retrieval/__init__.py` | Misma creacion que CONTEXTUAL_HYBRID (reranking en evaluator) | **Hecho** |
 
 ### Fase 5: Comparacion y Reporte
 **Objetivo:** Tabla comparativa de las 4 estrategias, replicando la del cookbook.

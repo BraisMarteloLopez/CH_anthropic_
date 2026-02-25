@@ -423,6 +423,240 @@ class TestCookbookEvaluatorHybrid:
         )
 
 
+class TestCookbookEvaluatorRerank:
+    """Tests para CONTEXTUAL_HYBRID_RERANK strategy (Fase 4)."""
+
+    def test_rerank_uses_same_setup_as_hybrid(self, tmp_path):
+        """CONTEXTUAL_HYBRID_RERANK uses same retriever as CONTEXTUAL_HYBRID."""
+        dataset, _ = _make_test_dataset()
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID_RERANK",
+            semantic_weight=0.8,
+            bm25_weight=0.2,
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+        config.reranker.base_url = "http://test:8082/v1"
+        config.reranker.model_name = "test-reranker"
+
+        evaluator = CookbookEvaluator(config)
+        evaluator._embedding_model = MagicMock()
+        evaluator._llm_service = MagicMock()
+
+        # Capture HybridRetriever creation
+        captured_configs = []
+
+        def capture_hybrid_init(self_inner, config, *args, **kwargs):
+            captured_configs.append(config)
+            raise RuntimeError("Captured — stopping init")
+
+        with patch(
+            "sandbox_cookbook.evaluator.HybridRetriever.__init__",
+            capture_hybrid_init,
+        ):
+            try:
+                evaluator._index_documents(dataset)
+            except RuntimeError as e:
+                if "Captured" not in str(e):
+                    raise
+
+        assert len(captured_configs) == 1
+        hybrid_cfg = captured_configs[0]
+        assert hybrid_cfg.rrf_formula == "cookbook"
+        assert hybrid_cfg.vector_weight == 0.8
+        assert hybrid_cfg.bm25_weight == 0.2
+
+    def test_rerank_oversamples_retrieval_k(self, tmp_path):
+        """CONTEXTUAL_HYBRID_RERANK over-samples retrieval_k."""
+        dataset, _ = _make_test_dataset()
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID_RERANK",
+            rerank_top_n=20,
+            rerank_oversample_factor=10,
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+        config.reranker.base_url = "http://test:8082/v1"
+        config.reranker.model_name = "test-reranker"
+
+        evaluator = CookbookEvaluator(config)
+        evaluator._embedding_model = MagicMock()
+        evaluator._llm_service = MagicMock()
+
+        # Capture the retrieval_k
+        captured_configs = []
+
+        def capture_hybrid_init(self_inner, config, *args, **kwargs):
+            captured_configs.append(config)
+            raise RuntimeError("Captured — stopping init")
+
+        with patch(
+            "sandbox_cookbook.evaluator.HybridRetriever.__init__",
+            capture_hybrid_init,
+        ):
+            try:
+                evaluator._index_documents(dataset)
+            except RuntimeError as e:
+                if "Captured" not in str(e):
+                    raise
+
+        assert len(captured_configs) == 1
+        # retrieval_k = rerank_top_n * oversample_factor = 20 * 10 = 200
+        assert captured_configs[0].retrieval_k == 200
+
+    def test_rerank_result_enriched_content(self):
+        """_rerank_result selects enriched content for reranker."""
+        config = CookbookConfig(
+            rerank_content="enriched",
+            rerank_top_n=2,
+        )
+        evaluator = CookbookEvaluator(config)
+
+        # Mock reranker
+        mock_reranker = MagicMock()
+        # Reranker returns reranked result
+        mock_reranker.rerank.return_value = RetrievalResult(
+            doc_ids=["d2", "d1"],
+            contents=["enriched_d2", "enriched_d1"],
+            scores=[0.9, 0.8],
+            retrieval_time_ms=5.0,
+        )
+        evaluator._reranker = mock_reranker
+
+        rr = RetrievalResult(
+            doc_ids=["d1", "d2", "d3"],
+            contents=["original_d1", "original_d2", "original_d3"],
+            scores=[0.7, 0.6, 0.5],
+            enriched_contents=["enriched_d1", "enriched_d2", "enriched_d3"],
+            retrieval_time_ms=10.0,
+        )
+
+        result = evaluator._rerank_result("test query", rr)
+
+        # Reranker called with enriched contents
+        call_args = mock_reranker.rerank.call_args
+        rerank_input = call_args[0][1]  # second positional arg
+        assert rerank_input.contents == ["enriched_d1", "enriched_d2", "enriched_d3"]
+
+        # Result has original contents restored
+        assert result.contents == ["original_d2", "original_d1"]
+
+    def test_rerank_result_original_content(self):
+        """_rerank_result selects original content when configured."""
+        config = CookbookConfig(
+            rerank_content="original",
+            rerank_top_n=2,
+        )
+        evaluator = CookbookEvaluator(config)
+
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = RetrievalResult(
+            doc_ids=["d1"],
+            contents=["original_d1"],
+            scores=[0.9],
+            retrieval_time_ms=5.0,
+        )
+        evaluator._reranker = mock_reranker
+
+        rr = RetrievalResult(
+            doc_ids=["d1", "d2"],
+            contents=["original_d1", "original_d2"],
+            scores=[0.7, 0.6],
+            enriched_contents=["enriched_d1", "enriched_d2"],
+            retrieval_time_ms=10.0,
+        )
+
+        evaluator._rerank_result("test query", rr)
+
+        # Reranker called with original contents
+        call_args = mock_reranker.rerank.call_args
+        rerank_input = call_args[0][1]
+        assert rerank_input.contents == ["original_d1", "original_d2"]
+
+    def test_rerank_result_both_content(self):
+        """_rerank_result combines original + enriched when content='both'."""
+        config = CookbookConfig(
+            rerank_content="both",
+            rerank_top_n=2,
+        )
+        evaluator = CookbookEvaluator(config)
+
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = RetrievalResult(
+            doc_ids=["d1"],
+            contents=["combined"],
+            scores=[0.9],
+            retrieval_time_ms=5.0,
+        )
+        evaluator._reranker = mock_reranker
+
+        rr = RetrievalResult(
+            doc_ids=["d1"],
+            contents=["original_d1"],
+            scores=[0.7],
+            enriched_contents=["enriched_d1"],
+            retrieval_time_ms=10.0,
+        )
+
+        evaluator._rerank_result("test query", rr)
+
+        # Reranker called with combined text
+        call_args = mock_reranker.rerank.call_args
+        rerank_input = call_args[0][1]
+        assert rerank_input.contents == ["original_d1\n\nContext: enriched_d1"]
+
+    def test_rerank_config_validation(self, tmp_path):
+        """CONTEXTUAL_HYBRID_RERANK requires reranker config."""
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID_RERANK",
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+        # Reranker not configured
+        config.reranker.base_url = ""
+        config.reranker.model_name = ""
+
+        errors = config.validate()
+        assert any("RERANKER_BASE_URL" in e for e in errors), (
+            f"Expected RERANKER_BASE_URL error, got: {errors}"
+        )
+        assert any("RERANKER_MODEL_NAME" in e for e in errors), (
+            f"Expected RERANKER_MODEL_NAME error, got: {errors}"
+        )
+
+    def test_rerank_content_validation(self, tmp_path):
+        """Invalid rerank_content value is caught by validation."""
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID_RERANK",
+            rerank_content="invalid_value",
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+        config.reranker.base_url = "http://test:8082/v1"
+        config.reranker.model_name = "test-reranker"
+
+        errors = config.validate()
+        assert any("COOKBOOK_RERANK_CONTENT" in e for e in errors), (
+            f"Expected COOKBOOK_RERANK_CONTENT error, got: {errors}"
+        )
+
+
 class TestCookbookEvaluatorIndexing:
     """Tests de indexacion."""
 
@@ -472,19 +706,15 @@ class TestCookbookEvaluatorIndexing:
         config.infra.embedding_model_name = "test-model"
         return CookbookEvaluator(config), config
 
-    def test_unsupported_strategy_raises(self, tmp_path):
-        """Estrategias no implementadas lanzan NotImplementedError."""
-        dataset, _ = _make_test_dataset()
+    def test_invalid_strategy_raises(self, tmp_path):
+        """Estrategia invalida lanza KeyError en get_strategy()."""
         config = CookbookConfig(
             dataset_path=tmp_path / "corpus.json",
             eval_path=tmp_path / "eval.jsonl",
-            strategy="CONTEXTUAL_HYBRID_RERANK",  # Fase 4, no implementada aun
+            strategy="NONEXISTENT_STRATEGY",
         )
-        evaluator = CookbookEvaluator(config)
-        evaluator._embedding_model = MagicMock()
-
-        with pytest.raises(NotImplementedError):
-            evaluator._index_documents(dataset)
+        with pytest.raises(KeyError):
+            config.get_strategy()
 
 
 # =============================================================================

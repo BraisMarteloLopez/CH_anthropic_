@@ -143,6 +143,22 @@ class CookbookConfig:
             if not self.infra.llm_model_name:
                 errors.append(f"{self.strategy} requiere LLM_MODEL_NAME")
 
+        # Reranker requerido para CONTEXTUAL_HYBRID_RERANK
+        if self.strategy == "CONTEXTUAL_HYBRID_RERANK":
+            if not self.reranker.base_url:
+                errors.append(
+                    "CONTEXTUAL_HYBRID_RERANK requiere RERANKER_BASE_URL"
+                )
+            if not self.reranker.model_name:
+                errors.append(
+                    "CONTEXTUAL_HYBRID_RERANK requiere RERANKER_MODEL_NAME"
+                )
+            if self.rerank_content not in ("enriched", "original", "both"):
+                errors.append(
+                    f"COOKBOOK_RERANK_CONTENT='{self.rerank_content}' no valido. "
+                    "Usar 'enriched', 'original' o 'both'"
+                )
+
         # context_position
         if self.context_position not in ("prepend", "append"):
             errors.append(

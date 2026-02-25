@@ -52,6 +52,7 @@ from shared.retrieval.contextual_retriever import (
     ANTHROPIC_CHUNK_PROMPT,
     ANTHROPIC_SYSTEM_PROMPT,
 )
+from shared.retrieval.reranker import CrossEncoderReranker
 
 from .config import CookbookConfig
 from .context_cache import ContextCache
@@ -75,6 +76,7 @@ class CookbookEvaluator:
         self.config = config
         self._embedding_model = None
         self._llm_service = None
+        self._reranker: Optional[CrossEncoderReranker] = None
         self._retriever: Optional[BaseRetriever] = None
         self._context_cache: Optional[ContextCache] = None
 
@@ -157,6 +159,14 @@ class CookbookEvaluator:
             )
             logger.info(f"  LLM: {self.config.infra.llm_model_name}")
 
+        # Reranker requerido para CONTEXTUAL_HYBRID_RERANK
+        if self.config.strategy == "CONTEXTUAL_HYBRID_RERANK":
+            self._reranker = CrossEncoderReranker(
+                base_url=self.config.reranker.base_url,
+                model_name=self.config.reranker.model_name,
+            )
+            logger.info(f"  Reranker: {self.config.reranker.model_name}")
+
     # -----------------------------------------------------------------
     # DATASET
     # -----------------------------------------------------------------
@@ -233,7 +243,10 @@ class CookbookEvaluator:
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
 
-        elif strategy == RetrievalStrategy.CONTEXTUAL_HYBRID:
+        elif strategy in (
+            RetrievalStrategy.CONTEXTUAL_HYBRID,
+            RetrievalStrategy.CONTEXTUAL_HYBRID_RERANK,
+        ):
             context_generator = LLMContextGenerator(
                 llm_service=self._llm_service,
                 max_tokens=self.config.contextualize_max_tokens,
@@ -250,9 +263,16 @@ class CookbookEvaluator:
             self._load_context_cache(context_generator)
 
             # Hybrid inner: BM25 on enriched text + Vector + cookbook RRF
+            # For RERANK: over-sample retrieval_k to rerank_top_n * oversample
+            k_retrieval = max(self.config.eval_k_values)
+            if strategy == RetrievalStrategy.CONTEXTUAL_HYBRID_RERANK:
+                k_retrieval = (
+                    self.config.rerank_top_n * self.config.rerank_oversample_factor
+                )
+
             hybrid_config = RetrievalConfig(
                 strategy=strategy,
-                retrieval_k=max(self.config.eval_k_values),
+                retrieval_k=k_retrieval,
                 hnsw_num_threads=self.config.retrieval.hnsw_num_threads,
                 context_max_tokens=self.config.contextualize_max_tokens,
                 context_batch_size=self.config.contextualize_batch_size,
@@ -278,8 +298,8 @@ class CookbookEvaluator:
             )
 
         else:
-            raise NotImplementedError(
-                f"Estrategia {strategy.name} sera implementada en fases posteriores"
+            raise ValueError(
+                f"Estrategia no soportada: {strategy.name}"
             )
 
         # Construir lista de documentos para indexacion
@@ -376,22 +396,36 @@ class CookbookEvaluator:
                 "Pre-embed fallido. Usando retrieval con embedding por query."
             )
 
-        # Fase 1: Retrieval
+        # Determine retrieval k (over-sample for reranking)
+        is_rerank = self.config.strategy == "CONTEXTUAL_HYBRID_RERANK"
+        if is_rerank:
+            k_retrieve = (
+                self.config.rerank_top_n * self.config.rerank_oversample_factor
+            )
+        else:
+            k_retrieve = k_max
+
+        # Fase 1: Retrieval (+ optional reranking)
         logger.info(
             f"  Retrieval: {n} queries "
-            f"({'pre-embed' if use_preembed else 'per-query'})..."
+            f"({'pre-embed' if use_preembed else 'per-query'})"
+            f"{f', rerank top {self.config.rerank_top_n}' if is_rerank else ''}..."
         )
         t0 = time.time()
         results: List[QueryEvaluationResult] = []
 
         for i, eq in enumerate(eval_queries):
-            # Retrieve
+            # Retrieve (over-sampled if reranking)
             if use_preembed:
                 rr = self._retriever.retrieve_by_vector(
-                    eq.query_text, query_vectors[i], top_k=k_max
+                    eq.query_text, query_vectors[i], top_k=k_retrieve
                 )
             else:
-                rr = self._retriever.retrieve(eq.query_text, top_k=k_max)
+                rr = self._retriever.retrieve(eq.query_text, top_k=k_retrieve)
+
+            # Fase 1.5: Reranking (CONTEXTUAL_HYBRID_RERANK only)
+            if is_rerank and self._reranker is not None:
+                rr = self._rerank_result(eq.query_text, rr)
 
             # Construir QueryRetrievalDetail (calcula recall_at_k automaticamente)
             detail = QueryRetrievalDetail(
@@ -416,6 +450,60 @@ class CookbookEvaluator:
 
         logger.info(f"  Retrieval completado en {time.time() - t0:.1f}s")
         return results
+
+    def _rerank_result(
+        self,
+        query: str,
+        rr: RetrievalResult,
+    ) -> RetrievalResult:
+        """
+        Aplica cross-encoder reranking sobre un RetrievalResult.
+
+        Selecciona contenido para el reranker segun config.rerank_content:
+          - "enriched": usa enriched_contents (contexto + original)
+          - "original": usa contents (solo original)
+          - "both": combina original + contexto como texto unico
+
+        Despues del reranking, restaura contents originales en el resultado.
+        """
+        # Seleccionar contenido para el reranker
+        rerank_content = self.config.rerank_content
+        enriched = rr.enriched_contents or rr.contents
+
+        if rerank_content == "enriched":
+            rerank_texts = enriched
+        elif rerank_content == "both":
+            rerank_texts = [
+                f"{orig}\n\nContext: {enr}"
+                for orig, enr in zip(rr.contents, enriched)
+            ]
+        else:
+            rerank_texts = rr.contents
+
+        # Build a RetrievalResult with rerank texts for the cross-encoder
+        rerank_input = RetrievalResult(
+            doc_ids=rr.doc_ids,
+            contents=rerank_texts,
+            scores=rr.scores,
+            retrieval_time_ms=rr.retrieval_time_ms,
+            strategy_used=rr.strategy_used,
+            metadata=rr.metadata,
+        )
+
+        # Rerank
+        reranked = self._reranker.rerank(
+            query, rerank_input, top_n=self.config.rerank_top_n
+        )
+
+        # Restore original contents (reranker returns rerank_texts as contents)
+        # Build a map from doc_id -> original content
+        original_map = dict(zip(rr.doc_ids, rr.contents))
+        reranked.contents = [
+            original_map.get(doc_id, content)
+            for doc_id, content in zip(reranked.doc_ids, reranked.contents)
+        ]
+
+        return reranked
 
     def _validate_pass_at_k(
         self,
