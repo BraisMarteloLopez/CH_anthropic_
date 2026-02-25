@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **PRE-IMPLEMENTACION** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 0 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -25,12 +25,16 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 
 | # | Tarea | Criterio de aceptacion | Estado |
 |---|---|---|---|
-| 0.1 | Verificar 162 tests existentes pasan | `pytest tests/` sin fallos | Pendiente |
-| 0.2 | Obtener dataset del cookbook de Anthropic | Archivos parseables en `sandbox_cookbook/data/` | Pendiente |
-| 0.3 | **(PC-6)** Agregar `sandbox_cookbook/data/` a `.gitignore` | Archivos de datos no se comitean | Pendiente |
+| 0.1 | Verificar 162 tests existentes pasan | `pytest tests/` sin fallos | **Hecho** |
+| 0.2 | Obtener dataset del cookbook de Anthropic | Archivos parseables en `sandbox_cookbook/data/` | **Hecho** |
+| 0.3 | **(PC-6)** Agregar `sandbox_cookbook/data/` a `.gitignore` | Archivos de datos no se comitean | **Hecho** |
 
 **Detalle tarea 0.2 — Fuente del dataset:**
-El dataset se obtiene del propio cookbook de Anthropic. Los archivos son `codebase_chunks.json` (9 codebases, 737 chunks) y `evaluation_set.jsonl` (248 queries con golden_chunk_uuids). Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO ni Parquet — el sistema de carga replica exactamente el del cookbook de Anthropic (lectura directa de JSON/JSONL local).
+El dataset se obtiene del [cookbook de Anthropic](https://github.com/anthropics/anthropic-cookbook/tree/main/capabilities/contextual-embeddings/data). Archivos:
+- `codebase_chunks.json` — 90 documentos, 737 chunks. Keys: `doc_id`, `original_uuid`, `content`, `chunks[]` (cada chunk: `chunk_id`, `original_index`, `content`). `chunk_id` sigue formato `doc_X_chunk_Y`.
+- `evaluation_set.jsonl` — 248 queries, 306 golden chunks (28 queries con >1 golden). Keys: `query`, `answer`, `golden_doc_uuids`, `golden_chunk_uuids` (cada uno: `[uuid, chunk_index]`), `golden_documents`, `golden_chunks`, `meta`.
+
+Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO ni Parquet — lectura directa de JSON/JSONL local. El mapeo `golden_chunk_uuids[uuid, idx]` -> `chunk_id` del corpus es directo via `original_uuid` del documento padre.
 
 ### Fase 1: Infraestructura Base (SIMPLE_VECTOR) — Sin LLM
 **Objetivo:** Baseline de retrieval vectorial puro. Verificar Pass@k ~80-87%.

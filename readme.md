@@ -4,7 +4,7 @@ Replica del experimento de **Contextual Retrieval** de Anthropic ([blog](https:/
 
 ## Que hace
 
-Ejecuta y compara **4 estrategias incrementales** de retrieval sobre un dataset de 9 codebases (737 chunks, 248 queries):
+Ejecuta y compara **4 estrategias incrementales** de retrieval sobre un dataset de 90 documentos de codigo (737 chunks, 248 queries, 306 golden chunks):
 
 | Estrategia | Descripcion | Pass@20 esperado |
 |---|---|---|
@@ -36,7 +36,7 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y como red 
 
 El sistema de carga de datos **NO** replica el patron MinIO/Parquet de sandbox_mteb. Se replica el sistema del cookbook de Anthropic:
 
-- **Fuente:** Dos archivos del cookbook de Anthropic: `codebase_chunks.json` (9 codebases, 737 chunks) y `evaluation_set.jsonl` (248 queries con `golden_chunk_uuids`).
+- **Fuente:** Dos archivos del [cookbook de Anthropic](https://github.com/anthropics/anthropic-cookbook/tree/main/capabilities/contextual-embeddings/data): `codebase_chunks.json` (90 documentos, 737 chunks) y `evaluation_set.jsonl` (248 queries, 306 golden chunks). 28 queries tienen >1 golden chunk (Recall@k != Hit@k para esas queries).
 - **Carga:** Lectura directa de JSON/JSONL local. Sin MinIO, sin Parquet, sin ETL.
 - **Ubicacion:** `sandbox_cookbook/data/` (excluido de git via `.gitignore`).
 - **CookbookLoader:** Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids mapeados a `relevant_doc_ids`. Valida que cada golden chunk existe en el corpus.

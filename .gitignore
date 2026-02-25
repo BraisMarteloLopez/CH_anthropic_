@@ -1,0 +1,30 @@
+# Dataset (archivos grandes, no comitear)
+_inspired_sandbox_evaluator/sandbox_cookbook/data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Entorno
+.env
+*.env.local
+
+# Cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -21,9 +21,9 @@ Cada run produce un `EvaluationRun` comparable con los resultados del cookbook.
 
 ### 2.1 Fuente
 
-El cookbook usa dos archivos:
-- `codebase_chunks.json`: 9 documentos de codigo fuente, pre-chunkeados (737 chunks total)
-- `evaluation_set.jsonl`: 248 queries, cada una con `golden_chunk_uuids` y `golden_documents`
+El cookbook usa dos archivos ([fuente](https://github.com/anthropics/anthropic-cookbook/tree/main/capabilities/contextual-embeddings/data)):
+- `codebase_chunks.json`: 90 documentos de codigo fuente, pre-chunkeados (737 chunks total)
+- `evaluation_set.jsonl`: 248 queries (306 golden chunks; 28 queries con >1 golden). Keys: `query`, `answer`, `golden_doc_uuids`, `golden_chunk_uuids`, `golden_documents`, `golden_chunks`, `meta`
 
 ### 2.2 Estructura de codebase_chunks.json
 
