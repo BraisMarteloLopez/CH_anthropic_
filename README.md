@@ -10,7 +10,6 @@ Ambos comparten `shared/` para retrieval, embeddings, tipos y config.
 ## Arquitectura
 
 ```
-RAG_P/
 ├── shared/                          # Libreria compartida
 │   ├── types.py                     # NormalizedQuery, LoadedDataset, EvaluationRun, Protocols
 │   ├── metrics.py                   # F1, ExactMatch, Accuracy, Faithfulness (LLM-judge) [solo mteb]
@@ -46,10 +45,15 @@ RAG_P/
 │   ├── conftest.py                  # Mocks condicionales (solo si paquete no instalado)
 │   ├── test_cookbook_*.py            # 71 tests cookbook (config, loader, evaluator)
 │   ├── test_contextual_mode_a.py    # 26 tests shared/contextual_retriever
-│   ├── test_dtm4_rrf.py             # 20 tests RRF (classic + cookbook)
+│   ├── test_dtm4_rrf.py            # 20 tests RRF (classic + cookbook)
 │   ├── test_dt*.py                  # ~90 tests mteb/shared
 │   └── integration/                 # Tests contra NIM + MinIO reales
 │
+├── docs/                            # Documentacion historica
+│   ├── DESIGN.md                    # Diseno tecnico del cookbook (especificacion original)
+│   └── WORKPLAN.md                  # Plan de trabajo — 6 fases, COMPLETO
+│
+├── README_TEST.md                   # Infraestructura de tests (detalle)
 ├── pyproject.toml                   # Config pytest
 ├── mypy.ini                         # Config mypy
 └── requirements.txt
@@ -80,6 +84,14 @@ python -m sandbox_cookbook.run --compare-all --dry-run            # Validar conf
 `--compare-all` ejecuta las 4 estrategias secuencialmente con cache compartido: los contextos LLM generados en CONTEXTUAL_VECTOR se reusan en CONTEXTUAL_HYBRID y CONTEXTUAL_HYBRID_RERANK sin regenerar.
 
 Salida: `*_summary.csv`, `*_detail.csv` por estrategia + `comparison.csv` con Pass@k y failure rate reduction vs baseline.
+
+### Decisiones clave del cookbook
+
+- **Dataset**: Replica exacta de los archivos del cookbook (`codebase_chunks.json` + `evaluation_set.jsonl`). Carga JSON/JSONL local, sin MinIO ni Parquet.
+- **Pass@k = Recall@k**: Algebraicamente identicas. Se reutiliza `recall_at_k` de `QueryRetrievalDetail`, con validacion content-based como guardia de calidad.
+- **Solo metricas del paper**: Sin pipeline de generacion ni LLM-judge. Se descartan Hit@k, MRR, NDCG@k, F1, EM, Accuracy, Faithfulness.
+- **context_position**: Parametrizable (`"prepend"` blog / `"append"` cookbook) en `LLMContextGenerator`.
+- **Cache persistente**: JSON en disco con invalidacion por hash modelo+prompt. Compartido entre estrategias en `--compare-all`.
 
 ## sandbox_mteb (HotpotQA)
 
@@ -256,6 +268,7 @@ Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de int
 
 | ID | Fix |
 |---|---|
+| DT-2 | Mode A (documento padre) implementado en `LLMContextGenerator`: `mode="document"`, prompts XML Anthropic, truncation configurable (32000/8000 chars para cookbook vs 2000/1000 default). sandbox_cookbook usa Mode A; sandbox_mteb sigue usando Mode B (chunk + titulo). |
 | DT-3 | Logging JSONL estructurado (`structured_logging.py`). `LOG_FORMAT=jsonl\|text`. |
 | DT-4 | Tipado estricto: `mypy.ini`, `EmbeddingModelProtocol`, `LLMJudgeProtocol`, `py.typed`. 0 errores mypy. |
 | DT-5 | `pre_rerank_candidate_ids` en `QueryRetrievalDetail` para trazabilidad reranker. |
@@ -275,7 +288,8 @@ Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de int
 | DTm-10 | `collection_name = f"eval_{run_id}"` (unico, determinista). |
 | DTm-11 | `LLMMetrics.__copy__`/`__deepcopy__` crean Lock nuevo. |
 | DTm-17 | Metricas de retrieval efectivo (post-rerank): `generation_recall`, `generation_hit`, `reranker_rescue_count`. 15 tests. |
-| DT-2 | Mode A (documento padre) implementado en `LLMContextGenerator`: `mode="document"`, prompts XML Anthropic, truncation configurable (32000/8000 chars para cookbook vs 2000/1000 default). sandbox_cookbook usa Mode A; sandbox_mteb sigue usando Mode B (chunk + titulo). |
+| DTc-1 | Cache pre-fill usaba key-space incorrecto (re-hasheaba keys ya hasheadas). Fix: insercion directa de keys en `context_generator._cache`. |
+| DTc-3 | `assert` en `_validate_pass_at_k()` reemplazado por `raise ValueError` (no desaparece con `python -O`). |
 
 ### Abiertas
 
@@ -283,9 +297,7 @@ Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de int
 
 | ID | Descripcion | Impacto | Fix |
 |---|---|---|---|
-| DTc-1 | **Cache pre-fill usa key-space incorrecto.** `_load_context_cache()` hace `_make_cache_key(chunk_id, "")` pero el save path usa `_make_cache_key(chunk_content, parent_content)`. Las keys no coinciden — el cache se carga pero produce 0 hits. `--compare-all` con cache compartido regenera contextos en cada estrategia. | Bug funcional. Cache inoperante. | Cambiar pre-fill a insertar keys directamente sin re-hashear: `context_generator._cache[key] = ctx` |
 | DTc-2 | Cache invalidation solo hashea `ANTHROPIC_DOCUMENT_PROMPT`, ignora `system_prompt` y `chunk_prompt`. Si cambian los otros prompts pero no el document prompt, el cache no se invalida. | Correctness. Baja probabilidad. | Hashear los 3 prompts concatenados |
-| DTc-3 | `assert` en `_validate_pass_at_k()` desaparece con `python -O`. Usar excepcion propia. | Correctness con `-O`. Baja probabilidad. | Reemplazar assert por `raise` |
 
 #### Deuda mteb (pre-existente)
 
@@ -326,10 +338,12 @@ Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de int
 
 No vale la pena moverlos — `types.py` es el nucleo compartido y estos tipos no estorban.
 
-#### Import no usado en cookbook
-
-`MetricType` se importa en `sandbox_cookbook/evaluator.py` pero nunca se usa. Eliminar.
-
 #### RetrievalConfig: campos mteb-only
 
 `RetrievalConfig` tiene ~15 campos. Cookbook usa ~10. Los restantes (`bm25_language`, etc.) tienen defaults razonables y no estorban — no vale refactorizar.
+
+## Fuentes
+
+- [Anthropic Blog: Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)
+- [Anthropic Cookbook: Contextual Embeddings Guide](https://platform.claude.com/cookbook/capabilities-contextual-embeddings-guide)
+- [Contextual Retrieval Appendix II (PDF)](https://assets.anthropic.com/m/1632cded0a125333/original/Contextual-Retrieval-Appendix-2.pdf)

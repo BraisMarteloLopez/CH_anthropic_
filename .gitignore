@@ -1,5 +1,5 @@
 # Dataset (archivos grandes, no comitear)
-_inspired_sandbox_evaluator/sandbox_cookbook/data/
+sandbox_cookbook/data/
 
 # Python
 __pycache__/
