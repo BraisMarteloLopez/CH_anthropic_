@@ -359,12 +359,12 @@ class TestCookbookEvaluatorIndexing:
         return CookbookEvaluator(config), config
 
     def test_unsupported_strategy_raises(self, tmp_path):
-        """Estrategias no implementadas en Fase 1 lanzan NotImplementedError."""
+        """Estrategias no implementadas lanzan NotImplementedError."""
         dataset, _ = _make_test_dataset()
         config = CookbookConfig(
             dataset_path=tmp_path / "corpus.json",
             eval_path=tmp_path / "eval.jsonl",
-            strategy="CONTEXTUAL_VECTOR",
+            strategy="CONTEXTUAL_HYBRID",  # Fase 3, no implementada aun
         )
         evaluator = CookbookEvaluator(config)
         evaluator._embedding_model = MagicMock()

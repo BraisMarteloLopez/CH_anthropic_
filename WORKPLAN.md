@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 1 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 2 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -61,16 +61,16 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 2.1 | **(PC-2)** **Truncation limits configurables** | `shared/retrieval/contextual_retriever.py` | `max_parent_chars: int = 2000`, `max_chunk_chars: int = 1000`. Cookbook: 32000/8000 | Pendiente |
-| 2.2 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | Parametros: `mode`, `document_prompt_template`, `chunk_prompt_template`, `context_position`. Defaults preservan sandbox_mteb. `context_position` controla combinacion en `_build_enriched_text()` del generator; `EnrichedChunk.get_enriched_text()` se mantiene (backwards-compat, siempre "prepend") | Pendiente |
-| 2.3 | **Prompts Anthropic (XML tags)** | `shared/retrieval/contextual_retriever.py` | Constantes `ANTHROPIC_DOCUMENT_PROMPT` y `ANTHROPIC_CHUNK_PROMPT` con `<document>` y `<chunk>` tags | Pendiente |
-| 2.4 | **(PC-3)** **Fix strategy hardcodeada** | `shared/retrieval/contextual_retriever.py` | `result.strategy_used = self.config.strategy` en vez de hardcode `CONTEXTUAL_HYBRID` | Pendiente |
-| 2.5 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | `result.enriched_contents = list(result.contents)` antes del swap a originales | Pendiente |
-| 2.6 | **Cache persistente** | `sandbox_cookbook/context_cache.py` | JSON en disco con invalidacion por hash modelo+prompt | Pendiente |
-| 2.7 | **Factory CONTEXTUAL_VECTOR** | `shared/retrieval/__init__.py` | ContextualRetriever con inner=SimpleVectorRetriever | Pendiente |
-| 2.8 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | Pasar parent_content desde LoadedDataset.metadata["parent_documents"] | Pendiente |
-| 2.9 | **Tests Mode A + fixes** | `tests/test_contextual_mode_a.py` | Error sin parent, prompts XML, context_position, enriched_contents, strategy (PC-3), truncation (PC-2) | Pendiente |
-| 2.10 | **Verificar tests originales** | `tests/` | Sin regresiones | Pendiente |
+| 2.1 | **(PC-2)** **Truncation limits configurables** | `shared/retrieval/contextual_retriever.py` | `max_parent_chars`, `max_chunk_chars` en constructor. Defaults 2000/1000 (backwards-compat). Cookbook: 32000/8000 | **Hecho** |
+| 2.2 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | mode, document_prompt_template, chunk_prompt_template, system_prompt, context_position, _build_enriched_text(). Defaults preservan sandbox_mteb | **Hecho** |
+| 2.3 | **Prompts Anthropic (XML tags)** | `shared/retrieval/contextual_retriever.py` | ANTHROPIC_DOCUMENT_PROMPT, ANTHROPIC_CHUNK_PROMPT, ANTHROPIC_SYSTEM_PROMPT | **Hecho** |
+| 2.4 | **(PC-3)** **Fix strategy hardcodeada** | `shared/retrieval/contextual_retriever.py` | `result.strategy_used = self.config.strategy` | **Hecho** |
+| 2.5 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | enriched_contents guardado antes de swap, + mapa _enriched_contents | **Hecho** |
+| 2.6 | **Cache persistente** | `sandbox_cookbook/context_cache.py` | ContextCache: JSON en disco, invalidacion por hash modelo+prompt | **Hecho** |
+| 2.7 | **Factory CONTEXTUAL_VECTOR** | `shared/retrieval/__init__.py` | get_retriever soporta CONTEXTUAL_VECTOR (inner=SimpleVector) + CONTEXTUAL_HYBRID_RERANK + **context_kwargs | **Hecho** |
+| 2.8 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | CONTEXTUAL_VECTOR: LLM init, parent_content, Anthropic prompts, cache load/save | **Hecho** |
+| 2.9 | **Tests Mode A + fixes** | `tests/test_contextual_mode_a.py` | 26 tests: truncation, mode, XML prompts, context_position, strategy (PC-3), enriched_contents, ContextCache | **Hecho** |
+| 2.10 | **Verificar tests** | `tests/` | 224 passed (147 originales + 77 nuevos), 0 fallos, sin regresiones | **Hecho** |
 
 ### Fase 3: Hybrid Search (CONTEXTUAL_HYBRID)
 **Objetivo:** BM25 sobre texto enriquecido + RRF. Medir mejora adicional.

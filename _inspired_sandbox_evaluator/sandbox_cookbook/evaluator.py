@@ -1,14 +1,20 @@
 """
 CookbookEvaluator: evaluacion Contextual Retrieval (Anthropic).
 
-Pipeline (Fase 1 — solo SIMPLE_VECTOR):
+Pipeline:
     load -> index -> pre-embed queries -> retrieve -> evaluate Pass@k -> build_run
+
+Estrategias soportadas:
+  - SIMPLE_VECTOR: embedding puro (Fase 1)
+  - CONTEXTUAL_VECTOR: enrichment LLM + vector (Fase 2)
+  - CONTEXTUAL_HYBRID / CONTEXTUAL_HYBRID_RERANK: Fases 3-4
 
 Diferencias clave con MTEBEvaluator:
   - Dataset: JSON/JSONL local (no MinIO/Parquet)
   - Metrica: Pass@k = Recall@k (solo k=5,10,20)
   - Sin generacion LLM
   - Indexa con doc.content (no get_full_text(), PC-1)
+  - Pasa parent_content desde metadata["parent_documents"]
   - Validacion content-based como assertion de calidad
 """
 
@@ -30,7 +36,7 @@ from shared.types import (
     QueryEvaluationResult,
     QueryRetrievalDetail,
 )
-from shared.llm import batch_embed_queries, load_embedding_model
+from shared.llm import AsyncLLMService, batch_embed_queries, load_embedding_model
 from shared.retrieval.core import (
     BaseRetriever,
     RetrievalConfig,
@@ -38,8 +44,16 @@ from shared.retrieval.core import (
     RetrievalStrategy,
     SimpleVectorRetriever,
 )
+from shared.retrieval.contextual_retriever import (
+    ContextualRetriever,
+    LLMContextGenerator,
+    ANTHROPIC_DOCUMENT_PROMPT,
+    ANTHROPIC_CHUNK_PROMPT,
+    ANTHROPIC_SYSTEM_PROMPT,
+)
 
 from .config import CookbookConfig
+from .context_cache import ContextCache
 from .loader import CookbookEvalQuery, CookbookLoader
 
 logger = logging.getLogger(__name__)
@@ -49,14 +63,19 @@ class CookbookEvaluator:
     """
     Evaluador para el sandbox Contextual Retrieval.
 
-    Fase 1: solo SIMPLE_VECTOR. Fases posteriores agregan
-    CONTEXTUAL_VECTOR, CONTEXTUAL_HYBRID, CONTEXTUAL_HYBRID_RERANK.
+    Estrategias:
+      - SIMPLE_VECTOR: embedding puro (Fase 1)
+      - CONTEXTUAL_VECTOR: enrichment + vector puro (Fase 2)
+      - CONTEXTUAL_HYBRID: enrichment + BM25 + RRF (Fase 3)
+      - CONTEXTUAL_HYBRID_RERANK: + cross-encoder reranking (Fase 4)
     """
 
     def __init__(self, config: CookbookConfig):
         self.config = config
         self._embedding_model = None
+        self._llm_service = None
         self._retriever: Optional[BaseRetriever] = None
+        self._context_cache: Optional[ContextCache] = None
 
     def run(self) -> EvaluationRun:
         """Ejecuta evaluacion completa."""
@@ -109,7 +128,7 @@ class CookbookEvaluator:
     # -----------------------------------------------------------------
 
     def _init_components(self) -> None:
-        """Inicializa embedding model."""
+        """Inicializa embedding model y LLM (si necesario)."""
         logger.info("Inicializando componentes...")
         self._embedding_model = load_embedding_model(
             base_url=self.config.infra.embedding_base_url,
@@ -120,6 +139,22 @@ class CookbookEvaluator:
             f"  Embedding: {self.config.infra.embedding_model_name} "
             f"({self.config.infra.embedding_model_type})"
         )
+
+        # LLM requerido para estrategias contextuales
+        needs_llm = self.config.strategy in (
+            "CONTEXTUAL_VECTOR",
+            "CONTEXTUAL_HYBRID",
+            "CONTEXTUAL_HYBRID_RERANK",
+        )
+        if needs_llm:
+            self._llm_service = AsyncLLMService(
+                base_url=self.config.infra.llm_base_url,
+                model_name=self.config.infra.llm_model_name,
+                max_concurrent=self.config.infra.nim_max_concurrent,
+                timeout_seconds=self.config.infra.nim_timeout,
+                max_retries=self.config.infra.nim_max_retries,
+            )
+            logger.info(f"  LLM: {self.config.infra.llm_model_name}")
 
     # -----------------------------------------------------------------
     # DATASET
@@ -143,44 +178,125 @@ class CookbookEvaluator:
         Indexa el corpus en el retriever.
 
         PC-1: usa doc.content directo, sin get_full_text(), sin title.
+        Para estrategias CONTEXTUAL_*: pasa parent_content desde metadata.
         """
         logger.info("Indexando corpus...")
 
         strategy = self.config.get_strategy()
+        parent_docs = dataset.metadata.get("parent_documents", {})
+
+        retrieval_config = RetrievalConfig(
+            strategy=strategy,
+            retrieval_k=max(self.config.eval_k_values),
+            hnsw_num_threads=self.config.retrieval.hnsw_num_threads,
+            context_max_tokens=self.config.contextualize_max_tokens,
+            context_batch_size=self.config.contextualize_batch_size,
+        )
 
         if strategy == RetrievalStrategy.SIMPLE_VECTOR:
-            retrieval_config = RetrievalConfig(
-                strategy=strategy,
-                retrieval_k=max(self.config.eval_k_values),
-                hnsw_num_threads=self.config.retrieval.hnsw_num_threads,
-            )
             self._retriever = SimpleVectorRetriever(
                 config=retrieval_config,
                 embedding_model=self._embedding_model,
                 collection_name="cookbook_corpus",
                 embedding_batch_size=self.config.infra.embedding_batch_size,
             )
+
+        elif strategy == RetrievalStrategy.CONTEXTUAL_VECTOR:
+            context_generator = LLMContextGenerator(
+                llm_service=self._llm_service,
+                max_tokens=self.config.contextualize_max_tokens,
+                mode="document",
+                document_prompt_template=ANTHROPIC_DOCUMENT_PROMPT,
+                chunk_prompt_template=ANTHROPIC_CHUNK_PROMPT,
+                system_prompt=ANTHROPIC_SYSTEM_PROMPT,
+                context_position=self.config.context_position,
+                max_parent_chars=32000,
+                max_chunk_chars=8000,
+            )
+
+            # Cargar cache persistente si configurado
+            self._load_context_cache(context_generator)
+
+            inner = SimpleVectorRetriever(
+                config=retrieval_config,
+                embedding_model=self._embedding_model,
+                collection_name="cookbook_corpus",
+                embedding_batch_size=self.config.infra.embedding_batch_size,
+            )
+            self._retriever = ContextualRetriever(
+                config=retrieval_config,
+                embedding_model=self._embedding_model,
+                context_generator=context_generator,
+                inner_retriever=inner,
+                collection_name="cookbook_corpus",
+                embedding_batch_size=self.config.infra.embedding_batch_size,
+            )
+
         else:
             raise NotImplementedError(
                 f"Estrategia {strategy.name} sera implementada en fases posteriores"
             )
 
         # Construir lista de documentos para indexacion
-        documents = [
-            {
+        documents = []
+        for doc in dataset.corpus.values():
+            doc_dict: Dict[str, Any] = {
                 "doc_id": doc.doc_id,
                 "content": doc.content,  # PC-1: sin get_full_text()
                 "title": "",  # PC-1: sin title
             }
-            for doc in dataset.corpus.values()
-        ]
+            # Para estrategias contextuales: agregar parent_content
+            if strategy != RetrievalStrategy.SIMPLE_VECTOR:
+                parent_uuid = doc.metadata.get("parent_doc_id", "")
+                doc_dict["parent_content"] = parent_docs.get(parent_uuid, "")
+            documents.append(doc_dict)
 
+        t0 = time.time()
         success = self._retriever.index_documents(documents)
         if not success:
             raise RuntimeError("Error indexando documentos")
+        indexing_time = time.time() - t0
 
-        logger.info(f"  Indexados {len(documents)} chunks")
+        # Guardar cache persistente si procede
+        if strategy != RetrievalStrategy.SIMPLE_VECTOR:
+            self._save_context_cache(indexing_time)
+
+        logger.info(f"  Indexados {len(documents)} chunks en {indexing_time:.1f}s")
         return len(documents)
+
+    def _load_context_cache(self, context_generator: LLMContextGenerator) -> None:
+        """Carga cache persistente y pre-llena el cache in-memory del generator."""
+        if not self.config.contexts_cache_path:
+            return
+
+        self._context_cache = ContextCache(self.config.contexts_cache_path)
+        prompt_template = ANTHROPIC_DOCUMENT_PROMPT
+
+        if self._context_cache.load(
+            model_name=self.config.infra.llm_model_name,
+            prompt_template=prompt_template,
+        ):
+            # Pre-llenar cache in-memory del generator
+            for chunk_id, ctx in self._context_cache.get_all().items():
+                context_generator._cache[
+                    context_generator._make_cache_key(chunk_id, "")
+                ] = ctx
+            logger.info(
+                f"  Cache pre-llenado: {self._context_cache.size} contextos"
+            )
+
+    def _save_context_cache(self, generation_time_s: float) -> None:
+        """Guarda cache persistente con contextos nuevos."""
+        if not self._context_cache:
+            return
+
+        # Extraer contextos del retriever
+        if isinstance(self._retriever, ContextualRetriever):
+            gen = self._retriever.context_generator
+            for key, ctx in gen._cache.items():
+                self._context_cache.put(key, ctx)
+
+        self._context_cache.save(generation_time_s=generation_time_s)
 
     # -----------------------------------------------------------------
     # EVALUACION

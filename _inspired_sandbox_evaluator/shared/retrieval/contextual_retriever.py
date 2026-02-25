@@ -1,15 +1,23 @@
 """
-Módulo: Contextual Retriever
-Descripción: Contextual Retrieval según paper de Anthropic.
+Modulo: Contextual Retriever
+Descripcion: Contextual Retrieval segun paper de Anthropic.
              Enriquece documentos con contexto LLM antes de indexar.
 
-Ubicación: shared/retrieval/contextual_retriever.py
+Ubicacion: shared/retrieval/contextual_retriever.py
 
 Flujo:
-    1. Pre-indexación: Documento -> LLM -> Contexto breve (50-100 tokens)
+    1. Pre-indexacion: Documento -> LLM -> Contexto breve (50-100 tokens)
     2. Enriquecimiento: Contexto + Documento original -> Documento enriquecido
-    3. Indexación: Documento enriquecido -> inner retriever
+    3. Indexacion: Documento enriquecido -> inner retriever
     4. Retrieval: Query -> inner retriever -> Resultados
+
+Cambios Fase 2:
+    - (PC-2) Truncation limits configurables (max_parent_chars, max_chunk_chars)
+    - mode="document"|"fallback" con error explicito si document sin parent
+    - Prompts Anthropic (XML tags) como alternativa a plain text
+    - context_position="prepend"|"append" parametrizable
+    - (PC-3) strategy_used = self.config.strategy (no hardcode CONTEXTUAL_HYBRID)
+    - enriched_contents expuesto en RetrievalResult antes de swap
 """
 
 from __future__ import annotations
@@ -19,7 +27,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from shared.types import EmbeddingModelProtocol, LLMJudgeProtocol
 
@@ -46,23 +54,12 @@ class EnrichedChunk:
     full_document_title: Optional[str] = None
 
     def get_enriched_text(self) -> str:
-        """Contexto generado + contenido original (orden Anthropic: context first)."""
+        """Contexto generado + contenido original (prepend, backwards-compat)."""
         return f"{self.generated_context}\n\n{self.original_content}"
 
 
 # =============================================================================
-# PROMPTS — Optimizados para modelos pequeños (nemotron-3-nano ~1B params)
-# =============================================================================
-# Los modelos nano no manejan bien XML complejo ni instrucciones abstractas.
-# Se usan headers en texto plano (Document: / Chunk:) e instrucciones directas.
-#
-# Modo A (con documento padre):
-#   El LLM recibe el documento padre (truncado) y el chunk específico.
-#   Genera 1-2 frases que sitúan el chunk dentro del documento.
-#
-# Modo B (sin documento padre — fallback):
-#   Solo se dispone del chunk y opcionalmente un título.
-#   El LLM genera un contexto basado en el contenido del chunk.
+# PROMPTS — Plain text (optimizados para modelos nano ~1B params)
 # =============================================================================
 
 CONTEXT_SYSTEM_PROMPT = (
@@ -87,6 +84,34 @@ Write 1-2 sentences describing what this chunk is about. Be specific, mention na
 
 
 # =============================================================================
+# PROMPTS — Anthropic XML tags (optimizados para Claude / modelos grandes)
+# =============================================================================
+
+ANTHROPIC_SYSTEM_PROMPT = (
+    "You are a helpful assistant. "
+    "Answer only with the succinct context and nothing else."
+)
+
+ANTHROPIC_DOCUMENT_PROMPT = """<document>
+{doc_content}
+</document>
+Here is the chunk we want to situate within the whole document
+<chunk>
+{chunk_content}
+</chunk>
+
+Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
+Answer only with the succinct context and nothing else."""
+
+ANTHROPIC_CHUNK_PROMPT = """<chunk>
+{chunk_content}
+</chunk>
+
+Please give a short succinct context to describe this chunk for the purposes of improving search retrieval.
+Answer only with the succinct context and nothing else."""
+
+
+# =============================================================================
 # GENERADOR DE CONTEXTO CON LLM
 # =============================================================================
 
@@ -94,27 +119,53 @@ class LLMContextGenerator:
     """
     Genera contexto descriptivo para chunks usando un LLM.
 
-    Implementa la técnica Contextual Retrieval de Anthropic:
-    - Modo A (con parent): pasa documento padre + chunk al LLM.
-    - Modo B (fallback): pasa solo chunk + título al LLM.
+    Implementa la tecnica Contextual Retrieval de Anthropic:
+    - mode="document": requiere parent_content (error si falta)
+    - mode="fallback": usa chunk + titulo (comportamiento original)
 
-    Solo expone la API async (batch). El flujo siempre es:
-    ContextualRetriever -> _run_batch_generation -> generate_contexts_batch
+    Parametros nuevos vs version original:
+    - mode: "document" (requiere parent) | "fallback" (tolerante)
+    - document_prompt_template / chunk_prompt_template: override prompts
+    - context_position: "prepend" (blog) | "append" (cookbook)
+    - max_parent_chars / max_chunk_chars: truncation configurables (PC-2)
     """
 
     def __init__(
         self,
         llm_service: LLMJudgeProtocol,
         max_tokens: int = 1000,
+        mode: Literal["document", "fallback"] = "fallback",
+        document_prompt_template: Optional[str] = None,
+        chunk_prompt_template: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        context_position: str = "prepend",
+        max_parent_chars: int = 2000,
+        max_chunk_chars: int = 1000,
     ):
         self.llm_service = llm_service
         self.max_tokens = max_tokens
+        self.mode = mode
+        self.context_position = context_position
+        self.max_parent_chars = max_parent_chars
+        self.max_chunk_chars = max_chunk_chars
+
+        # Prompts: custom > default segun mode
+        self._system_prompt = system_prompt or CONTEXT_SYSTEM_PROMPT
+        self._document_prompt = document_prompt_template or DOCUMENT_CONTEXT_PROMPT
+        self._chunk_prompt = chunk_prompt_template or FALLBACK_CONTEXT_PROMPT
+
         self._cache: Dict[str, str] = {}
         self._total_generated = 0
         self._total_cache_hits = 0
         self._total_errors = 0
         self._total_with_parent = 0
         self._total_fallback = 0
+
+    def _build_enriched_text(self, context: str, original: str) -> str:
+        """Combina contexto y original segun context_position."""
+        if self.context_position == "prepend":
+            return f"{context}\n\n{original}"
+        return f"{original}\n\n{context}"
 
     async def _generate_one(
         self,
@@ -123,12 +174,19 @@ class LLMContextGenerator:
         document_title: Optional[str] = None,
     ) -> str:
         """
-        Genera contexto para un chunk de forma asíncrona.
+        Genera contexto para un chunk de forma asincrona.
 
-        Si parent_content está disponible, usa el prompt con documento padre
-        (truncado a 2000 chars). Si no, usa el fallback (solo chunk + título).
-        Los inputs se truncan para respetar el context window de modelos nano.
+        mode="document": requiere parent_content (ValueError si falta).
+        mode="fallback": usa parent si disponible, fallback a titulo.
+        Truncation: max_parent_chars / max_chunk_chars (PC-2).
         """
+        # mode="document" requiere parent_content
+        if self.mode == "document" and not parent_content:
+            raise ValueError(
+                "Mode 'document' requiere parent_content. "
+                "El dataset debe proporcionar documentos completos."
+            )
+
         cache_key = self._make_cache_key(
             chunk_content, parent_content or document_title or ""
         )
@@ -137,21 +195,19 @@ class LLMContextGenerator:
             self._total_cache_hits += 1
             return self._cache[cache_key]
 
-        # Truncar inputs para modelos con context window limitado
-        truncated_chunk = chunk_content[:1000]
+        # (PC-2) Truncar con limites configurables
+        truncated_chunk = chunk_content[:self.max_chunk_chars]
 
         if parent_content:
-            # Modo A: prompt con documento padre (truncado)
-            truncated_parent = parent_content[:2000]
-            user_prompt = DOCUMENT_CONTEXT_PROMPT.format(
+            truncated_parent = parent_content[:self.max_parent_chars]
+            user_prompt = self._document_prompt.format(
                 doc_content=truncated_parent,
                 chunk_content=truncated_chunk,
             )
             self._total_with_parent += 1
         else:
-            # Modo B: fallback sin documento padre
             title = document_title or "Untitled"
-            user_prompt = FALLBACK_CONTEXT_PROMPT.format(
+            user_prompt = self._chunk_prompt.format(
                 title=title, chunk_content=truncated_chunk
             )
             self._total_fallback += 1
@@ -159,12 +215,11 @@ class LLMContextGenerator:
         try:
             response = await self.llm_service.invoke_async(
                 user_prompt,
-                system_prompt=CONTEXT_SYSTEM_PROMPT,
+                system_prompt=self._system_prompt,
                 max_tokens=self.max_tokens,
             )
             context = str(response).strip()
 
-            # Validación post-strip: captura respuestas de solo espacios/newlines
             if not context:
                 raise ValueError("LLM returned empty context after strip")
 
@@ -175,7 +230,6 @@ class LLMContextGenerator:
         except Exception as e:
             logger.warning(f"Error generando contexto: {e}. Usando fallback.")
             self._total_errors += 1
-            # Fallback mejorado: incluye keywords reales del chunk para retrieval
             chunk_preview = chunk_content[:200].replace("\n", " ")
             fallback = f"Document: {document_title or 'Untitled'}. Content: {chunk_preview}"
             self._cache[cache_key] = fallback
@@ -193,7 +247,7 @@ class LLMContextGenerator:
           - doc_id: str
           - content: str (texto del chunk)
           - title: str (opcional)
-          - parent_content: str (opcional, texto del documento padre)
+          - parent_content: str (opcional, requerido si mode="document")
         """
         enriched_chunks: List[EnrichedChunk] = []
         total = len(documents)
@@ -215,7 +269,7 @@ class LLMContextGenerator:
 
             for doc, ctx in zip(batch, contexts):
                 if isinstance(ctx, Exception):
-                    logger.warning(f"Excepción en batch: {ctx}")
+                    logger.warning(f"Excepcion en batch: {ctx}")
                     ctx = f"Document: {doc.get('title', 'Untitled')}."
 
                 enriched_chunks.append(EnrichedChunk(
@@ -230,7 +284,7 @@ class LLMContextGenerator:
                 logger.info(f"  Contextos generados: {batch_end}/{total}")
 
         logger.info(
-            f"Generación completada: {self._total_generated} generados, "
+            f"Generacion completada: {self._total_generated} generados, "
             f"{self._total_cache_hits} cache hits, {self._total_errors} errores"
         )
         return enriched_chunks
@@ -262,7 +316,7 @@ class ContextualRetriever(BaseRetriever):
     """
     Retriever que enriquece documentos con contexto LLM antes de indexar.
 
-    Patrón decorador: envuelve un inner retriever (Simple o Hybrid)
+    Patron decorador: envuelve un inner retriever (Simple o Hybrid)
     y le pasa documentos enriquecidos.
     """
 
@@ -280,9 +334,9 @@ class ContextualRetriever(BaseRetriever):
         self.context_generator = context_generator
 
         # Mapa doc_id -> contenido original (sin enriquecimiento).
-        # El texto enriquecido se usa para indexación/búsqueda;
-        # el original se devuelve para generación de respuesta.
         self._original_contents: Dict[str, str] = {}
+        # Mapa doc_id -> contenido enriquecido (para reranking).
+        self._enriched_contents: Dict[str, str] = {}
 
         if inner_retriever is not None:
             self._inner_retriever = inner_retriever
@@ -312,7 +366,7 @@ class ContextualRetriever(BaseRetriever):
     ) -> bool:
         """Enriquece documentos con contexto LLM e indexa en el inner retriever."""
         if not documents:
-            logger.warning("index_documents llamado con lista vacía")
+            logger.warning("index_documents llamado con lista vacia")
             return False
 
         start_time = time.perf_counter()
@@ -324,9 +378,16 @@ class ContextualRetriever(BaseRetriever):
             enriched_docs = []
             for chunk in enriched_chunks:
                 self._original_contents[chunk.chunk_id] = chunk.original_content
+
+                # Construir texto enriquecido respetando context_position
+                enriched_text = self.context_generator._build_enriched_text(
+                    chunk.generated_context, chunk.original_content
+                )
+                self._enriched_contents[chunk.chunk_id] = enriched_text
+
                 enriched_docs.append({
                     "doc_id": chunk.chunk_id,
-                    "content": chunk.get_enriched_text(),
+                    "content": enriched_text,
                     "title": chunk.full_document_title or "",
                 })
 
@@ -338,13 +399,13 @@ class ContextualRetriever(BaseRetriever):
             self._is_indexed = result
 
             logger.info(
-                f"ContextualRetriever: indexación {elapsed_ms:.0f}ms. "
+                f"ContextualRetriever: indexacion {elapsed_ms:.0f}ms. "
                 f"Stats: {self.context_generator.get_stats()}"
             )
             return result
 
         except Exception as e:
-            logger.error(f"Error en indexación contextual: {e}")
+            logger.error(f"Error en indexacion contextual: {e}")
             return False
 
     def retrieve(
@@ -353,8 +414,8 @@ class ContextualRetriever(BaseRetriever):
         top_k: Optional[int] = None,
     ) -> RetrievalResult:
         """
-        Delega búsqueda al inner retriever (indexado con texto enriquecido)
-        pero devuelve contenido original para generación de respuesta.
+        Delega busqueda al inner retriever (indexado con texto enriquecido)
+        pero devuelve contenido original para generacion de respuesta.
         """
         result = self._inner_retriever.retrieve(query, top_k)
         return self._swap_to_original_contents(result)
@@ -379,15 +440,22 @@ class ContextualRetriever(BaseRetriever):
         """
         Sustituye contenido enriquecido por original.
 
-        El enriquecimiento mejora matching de embeddings/BM25,
-        pero el LLM generador necesita el texto limpio.
+        Guarda enriched_contents antes del swap (para reranking).
+        (PC-3) Usa self.config.strategy en vez de hardcode.
         """
+        # (2.5) Exponer enriched_contents antes de swap
+        result.enriched_contents = [
+            self._enriched_contents.get(doc_id, content)
+            for doc_id, content in zip(result.doc_ids, result.contents)
+        ]
+
         result.contents = [
             self._original_contents.get(doc_id, content)
             for doc_id, content in zip(result.doc_ids, result.contents)
         ]
 
-        result.strategy_used = RetrievalStrategy.CONTEXTUAL_HYBRID
+        # (PC-3) Fix: usar strategy del config, no hardcode CONTEXTUAL_HYBRID
+        result.strategy_used = self.config.strategy
 
         result.metadata["contextual_enrichment"] = True
         result.metadata["context_generator_stats"] = self.context_generator.get_stats()
@@ -397,8 +465,9 @@ class ContextualRetriever(BaseRetriever):
         self._inner_retriever.clear_index()
         self.context_generator.clear_cache()
         self._original_contents.clear()
+        self._enriched_contents.clear()
         self._is_indexed = False
-        logger.debug("ContextualRetriever: índice, cache y mapa de originales limpiados")
+        logger.debug("ContextualRetriever: indice, cache y mapas limpiados")
 
     def _run_batch_generation(
         self, documents: List[Dict[str, Any]]
@@ -417,4 +486,7 @@ __all__ = [
     "LLMContextGenerator",
     "ContextualRetriever",
     "EnrichedChunk",
+    "ANTHROPIC_DOCUMENT_PROMPT",
+    "ANTHROPIC_CHUNK_PROMPT",
+    "ANTHROPIC_SYSTEM_PROMPT",
 ]
