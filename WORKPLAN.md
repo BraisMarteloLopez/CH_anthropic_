@@ -1,6 +1,6 @@
 # Plan de Trabajo: sandbox_cookbook
 
-Estado: **FASE 2 COMPLETA** | Ultima actualizacion: 2026-02-25
+Estado: **FASE 3 COMPLETA** | Ultima actualizacion: 2026-02-25
 
 ---
 
@@ -77,9 +77,9 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
-| 3.1 | **Formula RRF cookbook** | `shared/retrieval/hybrid_retriever.py` | Parametro `formula` en `reciprocal_rank_fusion()`. Default "classic" | Pendiente |
-| 3.2 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | Pesos asimetricos (semantic=0.8, bm25=0.2) | Pendiente |
-| 3.3 | **Tests RRF cookbook** | `tests/test_dtm4_rrf.py` (extension) | Formula "cookbook" produce ranking correcto | Pendiente |
+| 3.1 | **Formula RRF cookbook** | `shared/retrieval/hybrid_retriever.py` | Parametro `formula` en `reciprocal_rank_fusion()`. Default "classic" | **Hecho** |
+| 3.2 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | Pesos asimetricos (semantic=0.8, bm25=0.2) | **Hecho** |
+| 3.3 | **Tests RRF cookbook** | `tests/test_dtm4_rrf.py` (extension) | Formula "cookbook" produce ranking correcto (9 tests) + 3 tests evaluator hybrid | **Hecho** |
 
 ### Fase 4: Reranking (CONTEXTUAL_HYBRID_RERANK)
 **Objetivo:** Cross-encoder reranking post-retrieval. Mejora final.

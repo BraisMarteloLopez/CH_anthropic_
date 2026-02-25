@@ -28,7 +28,8 @@ from shared.types import (
     NormalizedQuery,
     QueryRetrievalDetail,
 )
-from shared.retrieval.core import RetrievalResult, RetrievalStrategy
+from shared.retrieval.core import RetrievalConfig, RetrievalResult, RetrievalStrategy
+from shared.retrieval.hybrid_retriever import HybridRetriever
 
 
 # =============================================================================
@@ -309,6 +310,119 @@ class TestCookbookEvaluatorValidation:
         evaluator._validate_pass_at_k(detail, [], k=20)
 
 
+class TestCookbookEvaluatorHybrid:
+    """Tests para CONTEXTUAL_HYBRID strategy (Fase 3)."""
+
+    def test_contextual_hybrid_creates_hybrid_inner(self, tmp_path):
+        """CONTEXTUAL_HYBRID crea HybridRetriever como inner retriever."""
+        dataset, _ = _make_test_dataset()
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID",
+            semantic_weight=0.8,
+            bm25_weight=0.2,
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+
+        evaluator = CookbookEvaluator(config)
+        evaluator._embedding_model = MagicMock()
+        evaluator._llm_service = MagicMock()
+
+        # Capture what gets created
+        from shared.retrieval.contextual_retriever import ContextualRetriever
+        from shared.retrieval.hybrid_retriever import HybridRetriever
+
+        created_retrievers = []
+
+        original_init = ContextualRetriever.__init__
+
+        def capture_init(self_inner, **kwargs):
+            created_retrievers.append(kwargs.get("inner_retriever"))
+            # Don't actually initialize (avoids ChromaDB/Tantivy deps)
+            raise RuntimeError("Captured — stopping init")
+
+        with patch.object(ContextualRetriever, "__init__", capture_init):
+            try:
+                evaluator._index_documents(dataset)
+            except RuntimeError as e:
+                if "Captured" not in str(e):
+                    raise
+
+        assert len(created_retrievers) == 1
+        assert isinstance(created_retrievers[0], HybridRetriever)
+
+    def test_contextual_hybrid_uses_cookbook_rrf(self, tmp_path):
+        """CONTEXTUAL_HYBRID uses cookbook RRF formula with asymmetric weights."""
+        dataset, _ = _make_test_dataset()
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID",
+            semantic_weight=0.8,
+            bm25_weight=0.2,
+            num_chunks_to_recall=150,
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        config.infra.llm_base_url = "http://test:8081/v1"
+        config.infra.llm_model_name = "test-llm"
+
+        evaluator = CookbookEvaluator(config)
+        evaluator._embedding_model = MagicMock()
+        evaluator._llm_service = MagicMock()
+
+        # Capture the HybridRetriever config
+        captured_configs = []
+
+        original_hybrid_init = HybridRetriever.__init__
+
+        def capture_hybrid_init(self_inner, config, *args, **kwargs):
+            captured_configs.append(config)
+            raise RuntimeError("Captured — stopping init")
+
+        with patch(
+            "sandbox_cookbook.evaluator.HybridRetriever.__init__",
+            capture_hybrid_init,
+        ):
+            try:
+                evaluator._index_documents(dataset)
+            except RuntimeError as e:
+                if "Captured" not in str(e):
+                    raise
+
+        assert len(captured_configs) == 1
+        hybrid_cfg = captured_configs[0]
+        assert hybrid_cfg.vector_weight == 0.8
+        assert hybrid_cfg.bm25_weight == 0.2
+        assert hybrid_cfg.rrf_formula == "cookbook"
+        assert hybrid_cfg.pre_fusion_k == 150
+
+    def test_contextual_hybrid_needs_llm_in_config_validation(self, tmp_path):
+        """CONTEXTUAL_HYBRID requires LLM config in validation."""
+        config = CookbookConfig(
+            dataset_path=tmp_path / "corpus.json",
+            eval_path=tmp_path / "eval.jsonl",
+            strategy="CONTEXTUAL_HYBRID",
+        )
+        config.infra.embedding_base_url = "http://test:8080/v1"
+        config.infra.embedding_model_name = "test-model"
+        # LLM not configured
+        config.infra.llm_base_url = ""
+        config.infra.llm_model_name = ""
+
+        errors = config.validate()
+        assert any("LLM_BASE_URL" in e for e in errors), (
+            f"Expected LLM_BASE_URL error, got: {errors}"
+        )
+        assert any("LLM_MODEL_NAME" in e for e in errors), (
+            f"Expected LLM_MODEL_NAME error, got: {errors}"
+        )
+
+
 class TestCookbookEvaluatorIndexing:
     """Tests de indexacion."""
 
@@ -364,7 +478,7 @@ class TestCookbookEvaluatorIndexing:
         config = CookbookConfig(
             dataset_path=tmp_path / "corpus.json",
             eval_path=tmp_path / "eval.jsonl",
-            strategy="CONTEXTUAL_HYBRID",  # Fase 3, no implementada aun
+            strategy="CONTEXTUAL_HYBRID_RERANK",  # Fase 4, no implementada aun
         )
         evaluator = CookbookEvaluator(config)
         evaluator._embedding_model = MagicMock()

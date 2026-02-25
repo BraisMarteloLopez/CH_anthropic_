@@ -124,10 +124,17 @@ def reciprocal_rank_fusion(
     weights: Optional[List[float]] = None,
     k: int = 60,
     top_n: int = 10,
+    formula: str = "classic",
 ) -> List[Tuple[str, float]]:
     """
     Fusiona multiples rankings usando RRF.
-    RRF_score(d) = SUM weight_i / (k + rank_i(d))
+
+    Formulas disponibles:
+      - "classic": RRF_score(d) = SUM weight_i / (k + rank_i(d))
+        k=60 por defecto. Formula original de Cormack et al.
+      - "cookbook": score(d) = SUM weight_i / (rank_i(d))
+        Equivalente a k=0. Despues del sort, re-asigna scores
+        como 1/(new_rank+1) para normalizar. Variante de Anthropic cookbook.
     """
     if not rankings:
         return []
@@ -144,18 +151,40 @@ def reciprocal_rank_fusion(
 
     rrf_scores: Dict[str, float] = {}
 
-    for ranking_idx, ranking in enumerate(rankings):
-        weight = weights[ranking_idx]
-        for rank, (doc_id, _score) in enumerate(ranking, start=1):
-            rrf_contribution = weight / (k + rank)
-            rrf_scores[doc_id] = (
-                rrf_scores.get(doc_id, 0.0) + rrf_contribution
-            )
+    if formula == "cookbook":
+        # Cookbook variant: k=0, weighted rank fusion
+        for ranking_idx, ranking in enumerate(rankings):
+            weight = weights[ranking_idx]
+            for rank, (doc_id, _score) in enumerate(ranking, start=1):
+                rrf_contribution = weight / rank
+                rrf_scores[doc_id] = (
+                    rrf_scores.get(doc_id, 0.0) + rrf_contribution
+                )
 
-    sorted_results = sorted(
-        rrf_scores.items(), key=lambda x: x[1], reverse=True
-    )
-    return sorted_results[:top_n]
+        sorted_results = sorted(
+            rrf_scores.items(), key=lambda x: x[1], reverse=True
+        )
+
+        # Re-score: 1/(new_rank+1) for normalized final scores
+        reranked = [
+            (doc_id, 1.0 / (new_rank + 1))
+            for new_rank, (doc_id, _) in enumerate(sorted_results)
+        ]
+        return reranked[:top_n]
+    else:
+        # Classic RRF: weight / (k + rank)
+        for ranking_idx, ranking in enumerate(rankings):
+            weight = weights[ranking_idx]
+            for rank, (doc_id, _score) in enumerate(ranking, start=1):
+                rrf_contribution = weight / (k + rank)
+                rrf_scores[doc_id] = (
+                    rrf_scores.get(doc_id, 0.0) + rrf_contribution
+                )
+
+        sorted_results = sorted(
+            rrf_scores.items(), key=lambda x: x[1], reverse=True
+        )
+        return sorted_results[:top_n]
 
 
 # =============================================================================
@@ -320,6 +349,7 @@ class HybridRetriever(BaseRetriever):
             weights=[self.config.vector_weight, self.config.bm25_weight],
             k=self.config.rrf_k,
             top_n=k,
+            formula=self.config.rrf_formula,
         )
 
         doc_ids = []
@@ -359,6 +389,7 @@ class HybridRetriever(BaseRetriever):
             strategy_used=RetrievalStrategy.CONTEXTUAL_HYBRID,
             metadata={
                 "rrf_k": self.config.rrf_k,
+                "rrf_formula": self.config.rrf_formula,
                 "pre_fusion_k": pre_k,
                 "vector_weight": self.config.vector_weight,
                 "bm25_weight": self.config.bm25_weight,

@@ -56,6 +56,9 @@ class RetrievalConfig:
     context_max_tokens: int = 100
     context_batch_size: int = 50
 
+    # RRF formula: "classic" (k=60) or "cookbook" (k=0, re-score after sort)
+    rrf_formula: str = "classic"
+
     # BM25
     bm25_language: str = "en"
 

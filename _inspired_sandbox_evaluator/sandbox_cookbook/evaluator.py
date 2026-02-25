@@ -44,6 +44,7 @@ from shared.retrieval.core import (
     RetrievalStrategy,
     SimpleVectorRetriever,
 )
+from shared.retrieval.hybrid_retriever import HybridRetriever
 from shared.retrieval.contextual_retriever import (
     ContextualRetriever,
     LLMContextGenerator,
@@ -225,6 +226,50 @@ class CookbookEvaluator:
             )
             self._retriever = ContextualRetriever(
                 config=retrieval_config,
+                embedding_model=self._embedding_model,
+                context_generator=context_generator,
+                inner_retriever=inner,
+                collection_name="cookbook_corpus",
+                embedding_batch_size=self.config.infra.embedding_batch_size,
+            )
+
+        elif strategy == RetrievalStrategy.CONTEXTUAL_HYBRID:
+            context_generator = LLMContextGenerator(
+                llm_service=self._llm_service,
+                max_tokens=self.config.contextualize_max_tokens,
+                mode="document",
+                document_prompt_template=ANTHROPIC_DOCUMENT_PROMPT,
+                chunk_prompt_template=ANTHROPIC_CHUNK_PROMPT,
+                system_prompt=ANTHROPIC_SYSTEM_PROMPT,
+                context_position=self.config.context_position,
+                max_parent_chars=32000,
+                max_chunk_chars=8000,
+            )
+
+            # Cargar cache persistente si configurado
+            self._load_context_cache(context_generator)
+
+            # Hybrid inner: BM25 on enriched text + Vector + cookbook RRF
+            hybrid_config = RetrievalConfig(
+                strategy=strategy,
+                retrieval_k=max(self.config.eval_k_values),
+                hnsw_num_threads=self.config.retrieval.hnsw_num_threads,
+                context_max_tokens=self.config.contextualize_max_tokens,
+                context_batch_size=self.config.contextualize_batch_size,
+                vector_weight=self.config.semantic_weight,
+                bm25_weight=self.config.bm25_weight,
+                pre_fusion_k=self.config.num_chunks_to_recall,
+                rrf_formula="cookbook",
+            )
+
+            inner = HybridRetriever(
+                config=hybrid_config,
+                embedding_model=self._embedding_model,
+                collection_name="cookbook_corpus",
+                embedding_batch_size=self.config.infra.embedding_batch_size,
+            )
+            self._retriever = ContextualRetriever(
+                config=hybrid_config,
                 embedding_model=self._embedding_model,
                 context_generator=context_generator,
                 inner_retriever=inner,

@@ -13,6 +13,13 @@ Cobertura DTm-4:
   - Multiples rankings (3+)
   - k parametro afecta scores RRF
 
+Cobertura Fase 3 (cookbook formula):
+  - Cookbook formula uses k=0 (rank-only)
+  - Cookbook re-scores as 1/(new_rank+1) after sort
+  - Cookbook preserves order with asymmetric weights
+  - Cookbook empty rankings returns empty
+  - Classic formula is default (backwards-compat)
+
 Sin dependencias externas.
 """
 from shared.retrieval.hybrid_retriever import reciprocal_rank_fusion
@@ -195,6 +202,185 @@ def test_empty_ranking_in_list():
     assert result[0][0] == "d1"
 
 
+# =================================================================
+# Tests — Cookbook RRF formula (Fase 3)
+# =================================================================
+
+def test_cookbook_empty_rankings_returns_empty():
+    """Cookbook formula: sin rankings, retorna lista vacia."""
+    result = reciprocal_rank_fusion([], k=60, top_n=10, formula="cookbook")
+    assert result == []
+
+
+def test_cookbook_single_ranking_preserves_order():
+    """Cookbook formula: un solo ranking mantiene orden."""
+    ranking = [("d1", 10.0), ("d2", 5.0), ("d3", 1.0)]
+    result = reciprocal_rank_fusion(
+        [ranking], k=60, top_n=10, formula="cookbook"
+    )
+
+    ids = [doc_id for doc_id, _ in result]
+    assert ids == ["d1", "d2", "d3"]
+
+    # Cookbook re-scores: d1=1/1, d2=1/2, d3=1/3
+    scores = [s for _, s in result]
+    assert abs(scores[0] - 1.0) < 1e-10
+    assert abs(scores[1] - 0.5) < 1e-10
+    assert abs(scores[2] - 1.0 / 3) < 1e-10
+
+
+def test_cookbook_rescoring_formula():
+    """Cookbook formula: final scores are 1/(new_rank+1) after sort."""
+    ranking_a = [("d1", 10.0), ("d2", 5.0)]
+    ranking_b = [("d1", 8.0), ("d3", 6.0)]
+
+    result = reciprocal_rank_fusion(
+        [ranking_a, ranking_b], weights=[0.5, 0.5],
+        k=60, top_n=10, formula="cookbook",
+    )
+
+    # d1 is in both -> highest fusion score -> re-scored as 1/1
+    # d2 and d3 have lower fusion scores -> re-scored as 1/2 and 1/3
+    score_map = {doc_id: s for doc_id, s in result}
+    assert abs(score_map["d1"] - 1.0) < 1e-10, (
+        f"d1 should be re-scored as 1.0, got {score_map['d1']}"
+    )
+
+    # Second and third get 1/2 and 1/3
+    non_d1_scores = sorted(
+        [s for did, s in result if did != "d1"], reverse=True
+    )
+    assert abs(non_d1_scores[0] - 0.5) < 1e-10
+    assert abs(non_d1_scores[1] - 1.0 / 3) < 1e-10
+
+
+def test_cookbook_asymmetric_weights_affect_order():
+    """Cookbook formula: asymmetric weights change ranking order."""
+    # d_a only in ranking A (weight 0.8), d_b only in ranking B (weight 0.2)
+    # Both at position 1
+    ranking_a = [("d_a", 10.0)]
+    ranking_b = [("d_b", 10.0)]
+
+    result = reciprocal_rank_fusion(
+        [ranking_a, ranking_b], weights=[0.8, 0.2],
+        k=60, top_n=10, formula="cookbook",
+    )
+
+    ids = [doc_id for doc_id, _ in result]
+    # d_a has fusion score 0.8/1 = 0.8, d_b has 0.2/1 = 0.2
+    # After sort: d_a first, d_b second
+    assert ids[0] == "d_a", f"d_a should rank first, got {ids}"
+
+    # Re-scored: d_a=1/1=1.0, d_b=1/2=0.5
+    score_map = {doc_id: s for doc_id, s in result}
+    assert abs(score_map["d_a"] - 1.0) < 1e-10
+    assert abs(score_map["d_b"] - 0.5) < 1e-10
+
+
+def test_cookbook_doc_in_both_ranks_higher_than_single():
+    """Cookbook formula: doc in both rankings beats doc in only one."""
+    ranking_a = [("d1", 10.0), ("d2", 5.0)]
+    ranking_b = [("d1", 8.0), ("d3", 6.0)]
+
+    result = reciprocal_rank_fusion(
+        [ranking_a, ranking_b], weights=[0.5, 0.5],
+        k=60, top_n=10, formula="cookbook",
+    )
+
+    ids = [doc_id for doc_id, _ in result]
+    # d1 in both rankings at position 1 -> fusion = 0.5/1 + 0.5/1 = 1.0
+    # d2 only in A at pos 2 -> fusion = 0.5/2 = 0.25
+    # d3 only in B at pos 2 -> fusion = 0.5/2 = 0.25
+    assert ids[0] == "d1", f"d1 should rank first, got {ids}"
+
+
+def test_cookbook_k_parameter_ignored():
+    """Cookbook formula ignores k parameter (always uses k=0)."""
+    ranking = [("d1", 10.0)]
+
+    result_k10 = reciprocal_rank_fusion(
+        [ranking], k=10, top_n=10, formula="cookbook",
+    )
+    result_k100 = reciprocal_rank_fusion(
+        [ranking], k=100, top_n=10, formula="cookbook",
+    )
+
+    # Both should produce identical re-scored results (1/1 = 1.0)
+    assert abs(result_k10[0][1] - result_k100[0][1]) < 1e-10, (
+        "Cookbook formula should not depend on k"
+    )
+
+
+def test_cookbook_top_n_truncates():
+    """Cookbook formula: top_n limits output."""
+    ranking = [(f"d{i}", float(10 - i)) for i in range(10)]
+    result = reciprocal_rank_fusion(
+        [ranking], k=60, top_n=3, formula="cookbook",
+    )
+
+    assert len(result) == 3
+    ids = [doc_id for doc_id, _ in result]
+    assert ids == ["d0", "d1", "d2"]
+
+    # Re-scored after truncation: 1/1, 1/2, 1/3
+    scores = [s for _, s in result]
+    assert abs(scores[0] - 1.0) < 1e-10
+    assert abs(scores[1] - 0.5) < 1e-10
+    assert abs(scores[2] - 1.0 / 3) < 1e-10
+
+
+def test_classic_is_default_formula():
+    """Default formula is classic (backwards-compat)."""
+    ranking = [("d1", 10.0)]
+    k = 60
+
+    # Without formula parameter (default)
+    result_default = reciprocal_rank_fusion([ranking], k=k, top_n=10)
+    # Explicit classic
+    result_classic = reciprocal_rank_fusion(
+        [ranking], k=k, top_n=10, formula="classic",
+    )
+
+    assert abs(result_default[0][1] - result_classic[0][1]) < 1e-10, (
+        "Default formula should be classic"
+    )
+
+    # Classic score for d1 at rank 1: 1.0/num_rankings / (k+1)
+    expected = 1.0 / (k + 1)
+    assert abs(result_default[0][1] - expected) < 1e-10
+
+
+def test_cookbook_three_rankings():
+    """Cookbook formula: three rankings accumulate correctly."""
+    r1 = [("d1", 10.0), ("d2", 5.0)]
+    r2 = [("d2", 10.0), ("d3", 5.0)]
+    r3 = [("d1", 10.0), ("d3", 5.0)]
+
+    result = reciprocal_rank_fusion(
+        [r1, r2, r3], k=60, top_n=10, formula="cookbook",
+    )
+
+    # Fusion scores (before re-scoring):
+    # d1: w/1 + 0 + w/1 = 2w/1 (w=1/3)
+    # d2: w/2 + w/1 + 0 = w/2 + w = 3w/2
+    # d3: 0 + w/2 + w/2 = w
+    # d1 = 2/3, d2 = 3/6 = 1/2, d3 = 1/3
+    # Wait, w = 1/3
+    # d1 = 2*(1/3)/1 = 2/3
+    # d2 = (1/3)/2 + (1/3)/1 = 1/6 + 1/3 = 1/2
+    # d3 = (1/3)/2 + (1/3)/2 = 1/3
+    # Order: d1 > d2 > d3
+
+    ids = [doc_id for doc_id, _ in result]
+    assert ids == ["d1", "d2", "d3"], f"Order should be d1, d2, d3, got {ids}"
+
+    # Re-scored: 1/1, 1/2, 1/3
+    scores = [s for _, s in result]
+    assert abs(scores[0] - 1.0) < 1e-10
+    assert abs(scores[1] - 0.5) < 1e-10
+    assert abs(scores[2] - 1.0 / 3) < 1e-10
+
+
 if __name__ == "__main__":
     test_empty_rankings_returns_empty()
     test_single_ranking_preserves_order()
@@ -207,3 +393,13 @@ if __name__ == "__main__":
     test_three_rankings_accumulate()
     test_k_parameter_affects_score_magnitude()
     test_empty_ranking_in_list()
+    # Cookbook formula tests
+    test_cookbook_empty_rankings_returns_empty()
+    test_cookbook_single_ranking_preserves_order()
+    test_cookbook_rescoring_formula()
+    test_cookbook_asymmetric_weights_affect_order()
+    test_cookbook_doc_in_both_ranks_higher_than_single()
+    test_cookbook_k_parameter_ignored()
+    test_cookbook_top_n_truncates()
+    test_classic_is_default_formula()
+    test_cookbook_three_rankings()
