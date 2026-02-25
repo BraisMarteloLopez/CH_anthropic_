@@ -247,7 +247,82 @@ Loader nuevo para JSON local. No reutiliza MinIOLoader.
 
 Extender cache in-memory a persistencia JSON en disco.
 
-### 3. Decisiones Pendientes
+### 3. Puntos Ciegos Detectados (no contemplados en el plan original)
+
+Tras revision linea por linea del codigo existente, se identifican **6 problemas** no previstos:
+
+#### PC-1. `get_full_text()` contamina embeddings para codigo (RIESGO ALTO)
+
+**Codigo:** `shared/types.py` linea 127-140
+
+```python
+def get_full_text(self) -> str:
+    if self.title:
+        return f"{self.title}\n\n{self.content}"
+    return self.content
+```
+
+**Problema:** El evaluator indexa con `doc.get_full_text()` (evaluator.py linea 487). Esto **antepone el nombre de archivo** al contenido del chunk antes de generar embeddings. Para HotpotQA (titulos Wikipedia cortos y descriptivos) funciona bien. Para codigo fuente del cookbook, el titulo seria algo como `"codebase/src/auth.py"` — un string corto, generico, repetido en todos los chunks del mismo archivo.
+
+**Impacto:** El embedding de cada chunk estaria sesgado hacia tokens de rutas de archivo. Todos los chunks de un mismo archivo tendrian embeddings artificialmente similares entre si (por compartir titulo), lo que **degrada la capacidad de discriminar entre chunks del mismo archivo**. Este es exactamente el caso donde la busqueda necesita ser mas precisa.
+
+**Accion:** El cookbook de Anthropic indexa chunks **sin titulo**. El CookbookEvaluator debe indexar usando `doc.content` directo, no `doc.get_full_text()`. O bien, no asignar title a los NormalizedDocument del cookbook.
+
+#### PC-2. Truncamiento parent a 2000 chars destruye el approach de Anthropic (RIESGO ALTO)
+
+**Codigo:** `shared/retrieval/contextual_retriever.py` linea 141-145
+
+```python
+truncated_chunk = chunk_content[:1000]
+if parent_content:
+    truncated_parent = parent_content[:2000]
+```
+
+**Problema:** El punto central de Contextual Retrieval es darle al LLM el **documento completo** para generar contexto situacional. Los documentos de codigo del cookbook miden hasta 8K tokens (~32K chars). Con truncamiento a 2000 chars, el LLM solo ve el **6%** del documento. Esto anula la ventaja del approach.
+
+El truncamiento fue disenado para modelos nano con context window limitado (sandwich_mteb). Para el cookbook, donde el diseno propone usar modelos con mayor context window, es contraproducente.
+
+**Accion:** Hacer los limites de truncamiento configurables via parametros del constructor de `LLMContextGenerator` (no hardcodeados). Default: valores actuales (2000/1000) para sandbox_mteb. Cookbook: sin truncamiento o limites altos (ej: 32000/8000).
+
+#### PC-3. `_swap_to_original_contents()` hardcodea strategy = CONTEXTUAL_HYBRID (BUG)
+
+**Codigo:** `shared/retrieval/contextual_retriever.py` linea 390
+
+```python
+result.strategy_used = RetrievalStrategy.CONTEXTUAL_HYBRID
+```
+
+**Problema:** `ContextualRetriever` siempre marca el resultado como `CONTEXTUAL_HYBRID`, independientemente de si el inner retriever es `SimpleVectorRetriever` (CONTEXTUAL_VECTOR) o `HybridRetriever`. Para la estrategia CONTEXTUAL_VECTOR, esto es un **bug**: el resultado reportaria la estrategia incorrecta.
+
+**Accion:** Usar la strategy del config (`self.config.strategy`) en vez de hardcodear. O inferir del inner retriever. Debe corregirse antes de Fase 2.
+
+#### PC-4. `_batch_embed_queries()` esta en MTEBEvaluator, no en shared/ (NO REUTILIZABLE)
+
+**Codigo:** `sandbox_mteb/evaluator.py` lineas 506-592
+
+**Problema:** El plan marca `_batch_embed_queries()` como "reutilizable directamente", pero esta implementado como metodo privado de `MTEBEvaluator`. No puede llamarse desde `CookbookEvaluator` sin copiar el codigo.
+
+**Accion:** O bien (A) extraer a `shared/llm.py` como funcion standalone `batch_embed_queries(base_url, model_name, model_type, batch_size, texts)`, o bien (B) copiar el metodo en CookbookEvaluator. Opcion A es mejor (DRY), pero es un cambio en shared/ adicional. Decision: opcion A en Fase 1.
+
+#### PC-5. `EVAL_K_VALUES` es ClassVar fija [1, 3, 5, 10, 20] (RIGIDEZ)
+
+**Codigo:** `shared/types.py` linea 275
+
+```python
+EVAL_K_VALUES: ClassVar[List[int]] = [1, 3, 5, 10, 20]
+```
+
+**Problema:** `QueryRetrievalDetail.__post_init__()` calcula automaticamente Hit@k, Recall@k y NDCG@k para TODOS estos k values. El cookbook solo necesita k=5, 10, 20. Calcular k=1 y k=3 es desperdicio menor, pero el problema real es que los CSV de salida del sandbox_mteb iteran sobre estos k values para generar columnas. Si el CookbookEvaluator reutiliza `QueryRetrievalDetail`, tendra columnas para k=1 y k=3 que no corresponden al paper.
+
+**Accion:** Ignorar k=1 y k=3 en la capa de reporte del CookbookEvaluator. No modificar la ClassVar (romper sandbox_mteb). Solo filtrar al generar CSV: `for k in [5, 10, 20]: row[f"pass_at_{k}"] = qr.retrieval.recall_at_k[k]`.
+
+#### PC-6. Dataset no debe estar en git (PRACTICO)
+
+**Problema:** `codebase_chunks.json` (737 chunks con codigo fuente completo) y `evaluation_set.jsonl` (248 queries con golden documents completos) son archivos potencialmente grandes. No deben comitearse al repositorio.
+
+**Accion:** Agregar `sandbox_cookbook/data/*.json` y `sandbox_cookbook/data/*.jsonl` a `.gitignore`. Proveer script de descarga o instrucciones en env.example para obtener los archivos del cookbook de Anthropic.
+
+### 4. Decisiones Pendientes
 
 | Decision | Recomendacion |
 |---|---|
@@ -256,7 +331,7 @@ Extender cache in-memory a persistencia JSON en disco.
 | BM25 backend | Tantivy. 737 chunks es trivial |
 | Contenido reranking | Original + contexto (como cookbook). Parametrizable |
 
-**Veredicto: APROBADO para implementacion.**
+**Veredicto: APROBADO para implementacion, con las 6 correcciones adicionales integradas al plan.**
 
 ---
 
@@ -269,6 +344,7 @@ Extender cache in-memory a persistencia JSON en disco.
 |---|---|---|
 | 0.1 | Verificar 162 tests existentes pasan | `pytest tests/` sin fallos |
 | 0.2 | Obtener dataset (codebase_chunks.json + evaluation_set.jsonl) | Archivos parseables en `sandbox_cookbook/data/` |
+| 0.3 | **(PC-6)** Agregar `sandbox_cookbook/data/` a `.gitignore` | Archivos de datos no se comitean |
 
 ### Fase 1: Infraestructura Base (SIMPLE_VECTOR) — Sin LLM
 **Objetivo:** Baseline de retrieval vectorial puro. Verificar Pass@k ~80-87%.
@@ -277,26 +353,29 @@ Extender cache in-memory a persistencia JSON en disco.
 |---|---|---|---|
 | 1.1 | **Agregar estrategias al enum** | `shared/retrieval/core.py` | `CONTEXTUAL_VECTOR = auto()`, `CONTEXTUAL_HYBRID_RERANK = auto()` |
 | 1.2 | **Agregar enriched_contents a RetrievalResult** | `shared/retrieval/core.py` | `enriched_contents: Optional[List[str]] = None` |
-| 1.3 | **CookbookConfig** | `sandbox_cookbook/config.py` | Dataclass con: InfraConfig, RetrievalConfig, RerankerConfig, dataset_path, eval_path, results_dir, strategy, contextualize params, eval_k_values=[5,10,20]. Constructor `from_env()` |
-| 1.4 | **CookbookLoader** | `sandbox_cookbook/loader.py` | Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids en `relevant_doc_ids`. Validacion: cada golden chunk existe en corpus (assertion, no metrica separada) |
-| 1.5 | **CookbookEvaluator (solo SIMPLE_VECTOR)** | `sandbox_cookbook/evaluator.py` | Pipeline: load -> index -> retrieve -> **Recall@k** (k=5,10,20) -> build_run. Sin generacion. Sin Hit@k/MRR/NDCG@k en salida. CSV con columnas: strategy, pass_at_5, pass_at_10, pass_at_20, failure_rate_at_20 |
-| 1.6 | **Entry point** | `sandbox_cookbook/run.py` | `--strategy`, `--dry-run`, `--env`, `-v` |
-| 1.7 | **Tests loader** | `tests/test_cookbook_loader.py` | Parseo JSON, golden chunks validados, parent_documents en metadata |
-| 1.8 | **Verificar 162 tests originales pasan** | `tests/` | Sin regresiones en shared/ |
+| 1.3 | **(PC-4)** **Extraer `batch_embed_queries()` a shared/** | `shared/llm.py` | Funcion standalone `batch_embed_queries(base_url, model_name, model_type, batch_size, texts) -> List[List[float]]`. MTEBEvaluator la invoca via import (no duplicar) |
+| 1.4 | **CookbookConfig** | `sandbox_cookbook/config.py` | Dataclass con: InfraConfig, RetrievalConfig, RerankerConfig, dataset_path, eval_path, results_dir, strategy, contextualize params (incluyendo truncation limits), eval_k_values=[5,10,20]. Constructor `from_env()` |
+| 1.5 | **CookbookLoader** | `sandbox_cookbook/loader.py` | Lee JSON -> `LoadedDataset` con parent_documents en metadata. Lee JSONL -> queries con golden_chunk_ids en `relevant_doc_ids`. Validacion: cada golden chunk existe en corpus (assertion). **(PC-1)** NO asignar title a NormalizedDocument (evitar contaminacion embeddings) |
+| 1.6 | **CookbookEvaluator (solo SIMPLE_VECTOR)** | `sandbox_cookbook/evaluator.py` | Pipeline: load -> index con `doc.content` directo **(PC-1, NO usar get_full_text())** -> retrieve -> Recall@k -> build_run. **(PC-5)** CSV solo con k=5,10,20 (filtrar k=1,3 en reporte). Sin generacion |
+| 1.7 | **Entry point** | `sandbox_cookbook/run.py` | `--strategy`, `--dry-run`, `--env`, `-v` |
+| 1.8 | **Tests loader** | `tests/test_cookbook_loader.py` | Parseo JSON, golden chunks validados, parent_documents en metadata, title=None |
+| 1.9 | **Verificar 162 tests originales pasan** | `tests/` | Sin regresiones en shared/ |
 
 ### Fase 2: Contextual Embeddings (CONTEXTUAL_VECTOR) — Requiere LLM
 **Objetivo:** Enriquecimiento contextual con documento padre. Medir mejora vs baseline.
 
 | # | Tarea | Archivos | Detalle |
 |---|---|---|---|
-| 2.1 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | Parametros: `mode` ("document"/"fallback"), `document_prompt_template`, `chunk_prompt_template`, `context_position` ("prepend"/"append"). Error explicito si mode="document" sin parent_content. Defaults preservan comportamiento actual para sandbox_mteb |
-| 2.2 | **Prompts Anthropic (XML tags)** | `shared/retrieval/contextual_retriever.py` | Constantes `ANTHROPIC_DOCUMENT_PROMPT` y `ANTHROPIC_CHUNK_PROMPT` con `<document>` y `<chunk>` tags. Seleccionables via template params |
-| 2.3 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | En `_swap_to_original_contents()`: `result.enriched_contents = list(result.contents)` antes del swap |
-| 2.4 | **Cache persistente** | `sandbox_cookbook/context_cache.py` | JSON en disco: {model, prompt_hash, contexts, stats}. Invalidacion por hash mismatch |
-| 2.5 | **Factory CONTEXTUAL_VECTOR** | `shared/retrieval/__init__.py` | ContextualRetriever con inner=SimpleVectorRetriever |
-| 2.6 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | Pasar parent_content desde LoadedDataset.metadata["parent_documents"] |
-| 2.7 | **Tests Mode A** | `tests/test_contextual_mode_a.py` | Error sin parent, prompts XML, context_position, enriched_contents |
-| 2.8 | **Verificar tests originales** | `tests/` | Sin regresiones |
+| 2.1 | **(PC-2)** **Truncation limits configurables** | `shared/retrieval/contextual_retriever.py` | `LLMContextGenerator.__init__()` acepta `max_parent_chars: int = 2000` y `max_chunk_chars: int = 1000`. Defaults preservan comportamiento actual (sandbox_mteb). Cookbook pasara 32000/8000 |
+| 2.2 | **Refactor LLMContextGenerator** | `shared/retrieval/contextual_retriever.py` | Parametros: `mode` ("document"/"fallback"), `document_prompt_template`, `chunk_prompt_template`, `context_position` ("prepend"/"append"). Error explicito si mode="document" sin parent_content. Defaults preservan comportamiento actual |
+| 2.3 | **Prompts Anthropic (XML tags)** | `shared/retrieval/contextual_retriever.py` | Constantes `ANTHROPIC_DOCUMENT_PROMPT` y `ANTHROPIC_CHUNK_PROMPT` con `<document>` y `<chunk>` tags. Seleccionables via template params |
+| 2.4 | **(PC-3)** **Fix strategy hardcodeada en `_swap_to_original_contents()`** | `shared/retrieval/contextual_retriever.py` | Cambiar linea 390: `result.strategy_used = self.config.strategy` en vez de `RetrievalStrategy.CONTEXTUAL_HYBRID` |
+| 2.5 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | En `_swap_to_original_contents()`: `result.enriched_contents = list(result.contents)` antes del swap |
+| 2.6 | **Cache persistente** | `sandbox_cookbook/context_cache.py` | JSON en disco: {model, prompt_hash, contexts, stats}. Invalidacion por hash mismatch |
+| 2.7 | **Factory CONTEXTUAL_VECTOR** | `shared/retrieval/__init__.py` | ContextualRetriever con inner=SimpleVectorRetriever |
+| 2.8 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | Pasar parent_content desde LoadedDataset.metadata["parent_documents"] |
+| 2.9 | **Tests Mode A + fixes** | `tests/test_contextual_mode_a.py` | Error sin parent, prompts XML, context_position, enriched_contents, strategy correcta (PC-3), truncation limits (PC-2) |
+| 2.10 | **Verificar tests originales** | `tests/` | Sin regresiones |
 
 ### Fase 3: Hybrid Search (CONTEXTUAL_HYBRID)
 **Objetivo:** BM25 sobre texto enriquecido + RRF. Medir mejora adicional.
@@ -340,11 +419,14 @@ Extender cache in-memory a persistencia JSON en disco.
 
 - 2 estrategias nuevas en enum (`CONTEXTUAL_VECTOR`, `CONTEXTUAL_HYBRID_RERANK`)
 - 1 campo nuevo en `RetrievalResult` (`enriched_contents`)
-- Refactor `LLMContextGenerator` (mode, prompts, context_position)
+- Refactor `LLMContextGenerator` (mode, prompts, context_position, truncation limits configurables)
+- Fix bug strategy hardcodeada en `_swap_to_original_contents()` (PC-3)
+- Extraer `batch_embed_queries()` a shared/llm.py (PC-4)
 - Formula RRF alternativa "cookbook"
-- Sandbox completo: config, loader (JSON local), evaluator (4 estrategias), run
+- Sandbox completo: config, loader (JSON local, sin title en docs), evaluator (4 estrategias, indexa sin `get_full_text()`), run
 - Cache persistente de contextos
-- CSV con Pass@k (=Recall@k), Failure Rate (=1-Recall@k), % semantic, % BM25
+- CSV con Pass@k (=Recall@k) solo para k=5,10,20, Failure Rate (=1-Recall@k), % semantic, % BM25
+- `.gitignore` para datos del cookbook (PC-6)
 
 ### Lo que NO SE IMPLEMENTA (descartado)
 
@@ -355,6 +437,8 @@ Extender cache in-memory a persistencia JSON en disco.
 - ~~Hit@k, MRR, NDCG@k en salida~~ — Anthropic no las reporta
 - ~~Soporte Voyage AI / Cohere~~ — NIM primero, extension futura si necesaria
 - ~~Exporter generico extendido~~ — CSV minimalista directo en evaluator
+- ~~Title en NormalizedDocument para chunks de codigo~~ — Contamina embeddings (PC-1)
+- ~~Truncamiento fijo 2000/1000 chars~~ — Destruye approach Anthropic para docs largos (PC-2)
 
 ---
 
