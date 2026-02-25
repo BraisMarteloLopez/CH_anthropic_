@@ -103,6 +103,109 @@ Esta decision **simplifica drasticamente** el evaluator:
 
 ---
 
+## Analisis Estructural: Dataset HotpotQA vs Dataset Cookbook
+
+El sandbox existente fue disenado para HotpotQA. El cookbook de Anthropic usa un dataset con estructura **fundamentalmente diferente**. Este analisis detalla las incompatibilidades y donde el diseno actual del loader/evaluator no puede reutilizarse directamente.
+
+### Estructura de datos: comparacion lado a lado
+
+```
+HOTPOTQA (sandbox_mteb)                    COOKBOOK (sandbox_cookbook)
+========================                    ========================
+
+FUENTE: MinIO (remoto)                     FUENTE: JSON local (2 archivos)
+  s3://bucket/hotpotqa/                      sandbox_cookbook/data/
+    queries.parquet                            codebase_chunks.json
+    corpus.parquet                             evaluation_set.jsonl
+    qrels.parquet
+    metadata.json
+
+CORPUS: plano (1 nivel)                    CORPUS: jerarquico (2 niveles)
+  66576 documentos Wikipedia                 9 documentos padre
+  Cada doc = 1 pasaje independiente           -> 737 chunks hijos
+  Sin relacion padre-hijo                    Cada chunk pertenece a un documento
+  Sin documento completo                     Documento completo disponible (WHOLE_DOCUMENT)
+
+QUERIES: con respuesta textual             QUERIES: sin respuesta textual
+  query_id, text, answer, answer_type        query, golden_chunk_uuids, golden_documents
+  answer_type: "text" | "label"              No hay answer text
+  Evaluacion: generacion + F1/EM             Evaluacion: solo retrieval (Pass@k)
+
+RELEVANCIA: archivo separado (qrels)       RELEVANCIA: embebida en cada query
+  qrels.parquet: query_id -> doc_id          golden_chunk_uuids: [[doc_uuid, chunk_index], ...]
+  Relacion simple: 1 query -> N doc_ids      golden_documents: contenido completo para validacion
+  IDs directos                               IDs compuestos (doc_uuid + chunk_index)
+```
+
+### Incompatibilidades especificas con el loader existente
+
+| Aspecto | MinIOLoader (actual) | CookbookLoader (necesario) | Reutilizable? |
+|---|---|---|---|
+| **Fuente de datos** | `boto3.client.get_object()` -> Parquet -> DataFrame | `open().read()` -> JSON/JSONL | NO. Totalmente diferente |
+| **Parsing corpus** | `corpus_df.iterrows()` -> 1 doc = 1 fila plana | JSON con estructura jerarquica: doc -> chunks[] | NO. Estructura anidada vs plana |
+| **Parsing queries** | `queries_df.iterrows()` con campos answer, answer_type, level | JSONL con campos query, golden_chunk_uuids, golden_documents | NO. Campos diferentes |
+| **Mapping relevancia** | qrels.parquet separado: `{query_id: [doc_ids]}` | Embebido en query: `golden_chunk_uuids: [[uuid, idx], ...]` | NO. No hay archivo qrels |
+| **Generacion doc_id** | doc_id viene directo del Parquet | doc_id **se debe construir**: `f"{doc_uuid}__{chunk_index}"` | NO. Logica de ID compuesto nueva |
+| **Parent document** | No existe. `NormalizedDocument` no tiene parent | Campo `content` a nivel documento (WHOLE_DOCUMENT) | NO. Concepto inexistente en HotpotQA |
+| **Cache** | Parquet local en disco (misma estructura) | No necesario (archivos ya son locales) | NO. Sin cache |
+| **Validacion** | `check_connection()` a MinIO | Verificar archivos existen + golden chunks en corpus | NO. Validacion diferente |
+
+### Incompatibilidades con el evaluator existente
+
+| Aspecto | MTEBEvaluator (actual) | CookbookEvaluator (necesario) | Reutilizable? |
+|---|---|---|---|
+| **`_load_dataset()`** | `MinIOLoader(config.storage).load_dataset()` | `CookbookLoader(config.dataset_path).load()` | NO |
+| **`_select_subset_dev()`** | Shuffle + gold docs garantizados + distractores | No aplica. Dataset completo siempre (737 chunks, trivial) | NO. Innecesario |
+| **`_index_documents()`** | `doc.get_full_text()` = titulo + contenido | Necesita pasar **parent_content** ademas de content y title | PARCIAL. Falta parent_content |
+| **`_evaluate_queries()`** | Retrieval + generacion async + metricas F1/EM/Faithfulness | Solo retrieval + Recall@k. Sin generacion | NO. Pipeline completamente diferente |
+| **`_build_run()`** | Agrega Hit@k, MRR, NDCG@k, generation scores, reranker stats | Solo Recall@k (=Pass@k) para k=5,10,20 | PARCIAL. Logica de agregacion reutilizable pero campos diferentes |
+| **`_batch_embed_queries()`** | REST batch via urllib | Reutilizable directamente | SI |
+| **`_execute_retrieval()`** | Loop sync con retriever.retrieve_by_vector() | Reutilizable directamente | SI |
+| **Reranking** | `CrossEncoderReranker` integrado en evaluate_queries | Necesita acceso a `enriched_contents` para reranker | PARCIAL |
+| **Export** | `RunExporter.export()` -> JSON + 2 CSVs con metricas MTEB | CSV minimalista solo con Pass@k y Failure Rate | NO. Columnas diferentes |
+
+### Lo que SI se reutiliza (shared/)
+
+| Componente | Como se reutiliza |
+|---|---|
+| `NormalizedDocument` | Cada chunk = 1 NormalizedDocument. parent_doc_id en metadata |
+| `NormalizedQuery` | query_text + relevant_doc_ids (golden_chunk_ids). expected_answer = None |
+| `LoadedDataset` | Contenedor. metadata["parent_documents"] para WHOLE_DOCUMENT |
+| `QueryRetrievalDetail` | Calcula recall_at_k automaticamente en __post_init__ (= Pass@k) |
+| `EvaluationRun` | Contenedor de resultado. avg_recall_at_k = Pass@k |
+| `SimpleVectorRetriever` | Busqueda vectorial pura. Sin cambios |
+| `HybridRetriever` | BM25 + Vector + RRF. Formula RRF necesita extension |
+| `ContextualRetriever` | Patron decorador. Necesita refactor para Mode A + prompts |
+| `CrossEncoderReranker` | Reranking cross-encoder. Sin cambios |
+| `ChromaVectorStore` | Almacen vectorial. Sin cambios |
+| `TantivyIndex` | BM25 index. Sin cambios |
+| `load_embedding_model()` | Carga modelo NIM. Sin cambios |
+| `AsyncLLMService` | Para generacion de contextos. Sin cambios |
+| `run_sync()` | Ejecutar coroutines desde sync. Sin cambios |
+
+### Conclusion
+
+**El loader de sandbox_mteb no es reutilizable.** Se necesita un `CookbookLoader` escrito desde cero. Las razones:
+
+1. **Fuente diferente:** JSON local vs MinIO/Parquet remoto
+2. **Estructura jerarquica:** Documentos con chunks anidados vs documentos planos
+3. **IDs compuestos:** `doc_uuid__chunk_index` vs doc_id directo
+4. **Relevancia embebida:** golden_chunk_uuids en cada query vs archivo qrels separado
+5. **Parent document:** Concepto nuevo, no existe en HotpotQA
+6. **Sin respuesta textual:** No hay expected_answer, solo retrieval
+
+**El evaluator tampoco es reutilizable directamente** por:
+
+1. **Sin pipeline de generacion** (toda la mitad async del evaluator sobra)
+2. **Indexacion necesita parent_content** (campo adicional por documento)
+3. **Metricas diferentes** (solo Recall@k vs Hit@k+MRR+NDCG@k+F1+EM+Faithfulness)
+4. **Sin DEV_MODE** (dataset trivial, siempre se usa completo)
+5. **Reporte diferente** (CSV minimalista vs CSV con 30+ columnas)
+
+**Lo que si se reutiliza** es toda la capa de `shared/`: tipos de datos, retrieval pipeline (SimpleVector, Hybrid, Contextual, Reranker), vector store, BM25, embedding, LLM service. Esto es ~70% del codigo util. El loader y evaluator son ~30% que debe reescribirse.
+
+---
+
 ## Evaluacion del Diseno vs Sandbox Existente
 
 ### 1. Alineacion Arquitectonica
