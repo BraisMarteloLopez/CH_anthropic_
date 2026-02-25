@@ -32,7 +32,6 @@ from shared.types import (
     EvaluationRun,
     EvaluationStatus,
     LoadedDataset,
-    MetricType,
     NormalizedDocument,
     QueryEvaluationResult,
     QueryRetrievalDetail,
@@ -354,11 +353,11 @@ class CookbookEvaluator:
             model_name=self.config.infra.llm_model_name,
             prompt_template=prompt_template,
         ):
-            # Pre-llenar cache in-memory del generator
-            for chunk_id, ctx in self._context_cache.get_all().items():
-                context_generator._cache[
-                    context_generator._make_cache_key(chunk_id, "")
-                ] = ctx
+            # Pre-llenar cache in-memory del generator.
+            # Keys en el JSON ya son los hash keys del generator (save path
+            # los copia directamente de gen._cache), insertamos tal cual.
+            for key, ctx in self._context_cache.get_all().items():
+                context_generator._cache[key] = ctx
             logger.info(
                 f"  Cache pre-llenado: {self._context_cache.size} contextos"
             )
@@ -550,11 +549,12 @@ class CookbookEvaluator:
         )
         content_based = found / len(golden_contents)
 
-        assert abs(id_based - content_based) < 1e-9, (
-            f"Pass@{k} diverge: id_based={id_based}, "
-            f"content_based={content_based}. "
-            f"Bug en mapeo de IDs del loader."
-        )
+        if abs(id_based - content_based) >= 1e-9:
+            raise ValueError(
+                f"Pass@{k} diverge: id_based={id_based}, "
+                f"content_based={content_based}. "
+                f"Bug en mapeo de IDs del loader."
+            )
 
     # -----------------------------------------------------------------
     # BUILD RUN

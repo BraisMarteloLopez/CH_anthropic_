@@ -1,6 +1,11 @@
 # RAG_P v3.2
 
-Sistema de evaluacion RAG (Retrieval-Augmented Generation) para benchmarking de pipelines de recuperacion y generacion sobre datasets MTEB/BeIR (HotpotQA actualmente) con infraestructura NVIDIA NIM.
+Sistema de evaluacion RAG (Retrieval-Augmented Generation) con dos sandboxes independientes:
+
+- **sandbox_mteb**: Benchmarking MTEB/BeIR (HotpotQA) con generacion LLM + metricas
+- **sandbox_cookbook**: Replica del [Contextual Retrieval cookbook de Anthropic](https://github.com/anthropics/anthropic-cookbook/tree/main/capabilities/contextual-embeddings) — solo retrieval, 4 estrategias, Pass@k
+
+Ambos comparten `shared/` para retrieval, embeddings, tipos y config.
 
 ## Arquitectura
 
@@ -8,51 +13,77 @@ Sistema de evaluacion RAG (Retrieval-Augmented Generation) para benchmarking de 
 RAG_P/
 ├── shared/                          # Libreria compartida
 │   ├── types.py                     # NormalizedQuery, LoadedDataset, EvaluationRun, Protocols
-│   ├── metrics.py                   # F1, ExactMatch, Accuracy, Faithfulness (LLM-judge)
-│   ├── llm.py                       # AsyncLLMService, load_embedding_model
+│   ├── metrics.py                   # F1, ExactMatch, Accuracy, Faithfulness (LLM-judge) [solo mteb]
+│   ├── llm.py                       # AsyncLLMService, load_embedding_model, batch_embed_queries
 │   ├── config_base.py               # InfraConfig, RerankerConfig, helpers _env_*
-│   ├── report.py                    # RunExporter: JSON + CSV summary + CSV detail
-│   ├── vector_store.py              # ChromaVectorStore
-│   ├── structured_logging.py        # Logging JSONL estructurado
+│   ├── report.py                    # RunExporter: JSON + CSV summary + CSV detail [solo mteb]
+│   ├── vector_store.py              # ChromaVectorStore [usado indirectamente via retrievers]
+│   ├── structured_logging.py        # Logging JSONL estructurado [solo mteb]
 │   └── retrieval/
-│       ├── __init__.py              # Factory get_retriever()
+│       ├── __init__.py              # Factory get_retriever() [solo mteb]
 │       ├── core.py                  # BaseRetriever, SimpleVectorRetriever, RetrievalConfig
-│       ├── hybrid_retriever.py      # BM25 + Vector + RRF
-│       ├── contextual_retriever.py  # Enriquecimiento LLM (Anthropic pattern)
+│       ├── hybrid_retriever.py      # BM25 + Vector + RRF (formulas classic + cookbook)
+│       ├── contextual_retriever.py  # LLMContextGenerator (Mode A/B, Anthropic prompts)
 │       ├── reranker.py              # CrossEncoderReranker (NVIDIARerank)
 │       └── tantivy_index.py         # BM25 via Tantivy (Rust, fallback rank-bm25)
 │
-├── sandbox_mteb/                    # Evaluacion MTEB/BeIR
+├── sandbox_mteb/                    # Evaluacion MTEB/BeIR (HotpotQA)
 │   ├── config.py                    # MTEBConfig: .env -> dataclass validada
 │   ├── loader.py                    # MinIO/Parquet -> LoadedDataset
 │   ├── evaluator.py                 # Pipeline: pre-embed + retrieval + gen async
 │   ├── run.py                       # Entry point (--dry-run, -v)
 │   └── env.example                  # Plantilla .env
 │
-├── tests/                           # 147 unit + 15 integration tests (pytest)
+├── sandbox_cookbook/                 # Contextual Retrieval (Anthropic cookbook)
+│   ├── config.py                    # CookbookConfig: .env -> dataclass validada
+│   ├── loader.py                    # JSON/JSONL local -> LoadedDataset
+│   ├── evaluator.py                 # Pipeline: 4 estrategias, Pass@k, comparison.csv
+│   ├── context_cache.py             # Cache persistente de contextos LLM
+│   ├── run.py                       # Entry point (--compare-all, --dry-run, -v)
+│   └── env.example                  # Plantilla .env
+│
+├── tests/                           # 253 tests (pytest)
 │   ├── conftest.py                  # Mocks condicionales (solo si paquete no instalado)
-│   ├── test_*.py                    # 19 archivos — ver README_TEST.md
+│   ├── test_cookbook_*.py            # 71 tests cookbook (config, loader, evaluator)
+│   ├── test_contextual_mode_a.py    # 26 tests shared/contextual_retriever
+│   ├── test_dtm4_rrf.py             # 20 tests RRF (classic + cookbook)
+│   ├── test_dt*.py                  # ~90 tests mteb/shared
 │   └── integration/                 # Tests contra NIM + MinIO reales
-│       ├── conftest.py              # Carga .env real, fixtures de sesion
-│       └── test_*.py                # Requieren infraestructura accesible
 │
 ├── pyproject.toml                   # Config pytest
 ├── mypy.ini                         # Config mypy
 └── requirements.txt
 ```
 
-`download_datasets/` (ETL HuggingFace->Parquet->MinIO) y `data/` (cache, resultados) no estan en el repositorio.
-
 ## Estrategias de retrieval
 
-| Estrategia | Indexacion | Busqueda | Reranker |
-|---|---|---|---|
-| `SIMPLE_VECTOR` | Embedding directo (NIM) | Cosine similarity (ChromaDB) | Opcional |
-| `CONTEXTUAL_HYBRID` | Enriquecimiento LLM + embedding | BM25 (Tantivy) + Vector + RRF | Opcional |
+| Estrategia | Indexacion | Busqueda | Reranker | Sandbox |
+|---|---|---|---|---|
+| `SIMPLE_VECTOR` | Embedding directo | Cosine similarity (ChromaDB) | Opcional | ambos |
+| `CONTEXTUAL_VECTOR` | Enrichment LLM + embedding | Cosine similarity | No | cookbook |
+| `CONTEXTUAL_HYBRID` | Enrichment LLM + embedding | BM25 (Tantivy) + Vector + RRF | Opcional | ambos |
+| `CONTEXTUAL_HYBRID_RERANK` | Enrichment LLM + embedding | BM25 + Vector + RRF + cross-encoder | Si | cookbook |
 
-`CONTEXTUAL_HYBRID`: durante indexacion, cada documento se enriquece con contexto generado por LLM. El texto enriquecido se indexa en ChromaDB y Tantivy. Durante retrieval, se fusionan resultados BM25 + vectoriales via RRF, opcionalmente con reranking cross-encoder. El contenido original (no enriquecido) se usa para generacion. Requiere LLM incluso con `GENERATION_ENABLED=false`.
+Enrichment contextual: cada chunk se enriquece con un contexto generado por LLM a partir del documento padre (Mode A, prompts XML Anthropic). El texto enriquecido se indexa; el contenido original se preserva para evaluacion.
 
-## Pipeline de evaluacion
+## sandbox_cookbook (Contextual Retrieval)
+
+Replica del experimento del [cookbook de Anthropic](https://github.com/anthropics/anthropic-cookbook/tree/main/capabilities/contextual-embeddings). Dataset: 90 documentos, 737 chunks, 248 queries.
+
+```bash
+python -m sandbox_cookbook.run                                    # Una estrategia
+python -m sandbox_cookbook.run --strategy CONTEXTUAL_VECTOR       # Override
+python -m sandbox_cookbook.run --compare-all                      # 4 estrategias + comparison.csv
+python -m sandbox_cookbook.run --compare-all --dry-run            # Validar configs
+```
+
+`--compare-all` ejecuta las 4 estrategias secuencialmente con cache compartido: los contextos LLM generados en CONTEXTUAL_VECTOR se reusan en CONTEXTUAL_HYBRID y CONTEXTUAL_HYBRID_RERANK sin regenerar.
+
+Salida: `*_summary.csv`, `*_detail.csv` por estrategia + `comparison.csv` con Pass@k y failure rate reduction vs baseline.
+
+## sandbox_mteb (HotpotQA)
+
+Pipeline completo retrieval + generacion + metricas sobre HotpotQA (7405 queries, 66K docs) via MinIO/Parquet.
 
 ```
 .env -> MTEBConfig -> MinIO/cache(Parquet) -> LoadedDataset
@@ -199,16 +230,23 @@ Tres archivos por run en `data/results/`:
 
 ## Tests
 
-147 unit tests + 15 tests de integracion (162 total). Ejecutables con Python 3.10+.
+253 tests (147 originales + 106 nuevos cookbook/shared). Ejecutables con Python 3.10+.
 
 ```bash
-pytest tests/                      # Todo junto (unit + integracion)
+pytest tests/                      # Todo (253 tests)
 pytest tests/ -v                   # Verbose
 pytest tests/ -m "not integration" # Solo unit
-pytest tests/integration/ -v       # Solo integracion
+pytest tests/integration/ -v       # Solo integracion (requiere NIM + MinIO)
 ```
 
-**Mocking condicional:** `tests/conftest.py` solo mockea modulos de infraestructura (`boto3`, `langchain_*`, `chromadb`) si el paquete real no esta instalado. En entornos con NIM/MinIO, los modulos reales se preservan y los tests de integracion funcionan junto a los unit tests. En entornos restringidos, se mockean automaticamente y la integracion se salta.
+| Scope | Tests | Archivos |
+|---|---|---|
+| sandbox_cookbook | 71 | `test_cookbook_config.py`, `test_cookbook_loader.py`, `test_cookbook_evaluator.py` |
+| shared/retrieval (contextual, RRF) | 46 | `test_contextual_mode_a.py`, `test_dtm4_rrf.py` |
+| sandbox_mteb + shared | ~90 | `test_dt*.py`, `test_dtm*.py`, `test_metrics_*.py`, `test_format_*.py` |
+| shared/tantivy | 17 | `test_dtm4_tantivy_edge_cases.py` |
+
+**Mocking condicional:** `tests/conftest.py` solo mockea modulos de infraestructura (`boto3`, `langchain_*`, `chromadb`) si el paquete real no esta instalado.
 
 Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de integracion: ver `README_TEST.md`.
 
@@ -237,14 +275,61 @@ Detalle de cobertura por archivo, decisiones de mocking y diseno de tests de int
 | DTm-10 | `collection_name = f"eval_{run_id}"` (unico, determinista). |
 | DTm-11 | `LLMMetrics.__copy__`/`__deepcopy__` crean Lock nuevo. |
 | DTm-17 | Metricas de retrieval efectivo (post-rerank): `generation_recall`, `generation_hit`, `reranker_rescue_count`. 15 tests. |
+| DT-2 | Mode A (documento padre) implementado en `LLMContextGenerator`: `mode="document"`, prompts XML Anthropic, truncation configurable (32000/8000 chars para cookbook vs 2000/1000 default). sandbox_cookbook usa Mode A; sandbox_mteb sigue usando Mode B (chunk + titulo). |
 
 ### Abiertas
 
+#### Bugs (cookbook)
+
+| ID | Descripcion | Impacto | Fix |
+|---|---|---|---|
+| DTc-1 | **Cache pre-fill usa key-space incorrecto.** `_load_context_cache()` hace `_make_cache_key(chunk_id, "")` pero el save path usa `_make_cache_key(chunk_content, parent_content)`. Las keys no coinciden — el cache se carga pero produce 0 hits. `--compare-all` con cache compartido regenera contextos en cada estrategia. | Bug funcional. Cache inoperante. | Cambiar pre-fill a insertar keys directamente sin re-hashear: `context_generator._cache[key] = ctx` |
+| DTc-2 | Cache invalidation solo hashea `ANTHROPIC_DOCUMENT_PROMPT`, ignora `system_prompt` y `chunk_prompt`. Si cambian los otros prompts pero no el document prompt, el cache no se invalida. | Correctness. Baja probabilidad. | Hashear los 3 prompts concatenados |
+| DTc-3 | `assert` en `_validate_pass_at_k()` desaparece con `python -O`. Usar excepcion propia. | Correctness con `-O`. Baja probabilidad. | Reemplazar assert por `raise` |
+
+#### Deuda mteb (pre-existente)
+
 | ID | Descripcion | Impacto |
 |---|---|---|
-| DT-2 | Enriquecimiento contextual solo usa Mode B (chunk + titulo). Mode A (documento padre) no aplica a pasajes Wikipedia. Requiere rediseno para corpus con documentos jerarquicos. | Calidad retrieval. Futuro. |
-| DTm-12 | Sesgo LLM-judge en faithfulness para respuestas cortas: score 0.0-0.2 incluso con F1=1.0. Confirmado en run 20260223_095004 (distribucion bimodal: 22/65 faith<=0.2, todas respuestas cortas correctas). F1 es metrica primaria y suficiente; faithfulness solo informativa. | Sesgo metrica. Baja prioridad. |
-| DTm-13 | No-determinismo HNSW: ChromaDB 0.5-0.6 no soporta `hnsw:random_seed`. Recall@K varia +/-0.02 entre runs con diferente `collection_name`. Mitigacion: fijar seed cuando ChromaDB lo soporte. | Reproducibilidad. Baja prioridad. |
-| DTm-14 | Duplicacion contenido memoria: `retrieved_contents` + `generation_contents` (~1.5GB con 7K queries). Memoria suficiente en entorno actual. | Memoria. Baja prioridad. |
-| DTm-15 | ETL HotpotQA no asigna `answer_type="label"` a queries comparison (yes/no). El evaluador usa F1 en lugar de Accuracy para estas queries. Sin impacto numerico (tokens unicos: F1 y Accuracy equivalentes), pero `primary_metric_type` en CSV es incorrecto para analisis post-hoc. Corregir en ETL o detectar heuristicamente en el evaluador. | Clasificacion metrica. Baja prioridad. |
-| DTm-16 | Nemotron-3-nano responde "yes" a preguntas extractivas (~10% de queries en run 20260223_095004). El system prompt "For yes/no questions, start with yes or no" causa sobregeneralizacion en modelos pequenos. Deprime avg F1 en ~0.10 puntos. Mitigaciones: (a) condicionar instruccion yes/no por `answer_type` del query, (b) eliminar instruccion y delegar clasificacion al evaluador post-hoc, (c) usar modelo mas capaz. Referencia: `GENERATION_PROMPTS` en `sandbox_mteb/config.py`. | Calidad generacion. Media prioridad. |
+| DTm-12 | Sesgo LLM-judge en faithfulness para respuestas cortas: score 0.0-0.2 incluso con F1=1.0. | Sesgo metrica. Baja prioridad. |
+| DTm-13 | No-determinismo HNSW: ChromaDB 0.5-0.6 no soporta `hnsw:random_seed`. | Reproducibilidad. Baja prioridad. |
+| DTm-14 | Duplicacion contenido memoria: `retrieved_contents` + `generation_contents` (~1.5GB). | Memoria. Baja prioridad. |
+| DTm-15 | ETL HotpotQA no asigna `answer_type="label"` a queries comparison. | Clasificacion metrica. Baja prioridad. |
+| DTm-16 | Nemotron-3-nano responde "yes" a preguntas extractivas (~10%). | Calidad generacion. Media prioridad. |
+
+#### mypy (pre-existente)
+
+30 errores en `shared/` (0 en `sandbox_cookbook/`). Todos son patrones de import condicional (`ChatNVIDIA = None` cuando el paquete no esta instalado) y tipos de ChromaDB. No bloquean ejecucion.
+
+### Simplificacion de shared/
+
+#### Modulos solo usados por un sandbox
+
+| Modulo | Lineas | Usado por | Candidato a mover |
+|---|---|---|---|
+| `shared/metrics.py` | 1004 | solo mteb | Si — mover a `sandbox_mteb/metrics.py` |
+| `shared/report.py` | 259 | solo mteb | Si — mover a `sandbox_mteb/report.py` |
+| `shared/structured_logging.py` | 123 | solo mteb | Si — mover a `sandbox_mteb/` |
+| `shared/retrieval/__init__.py` (`get_retriever`) | 127 | solo mteb | Si — factory no usada por cookbook |
+
+`sandbox_cookbook` construye retrievers directamente en `evaluator.py` (necesita control fino sobre HybridRetriever config, cache, y over-sampling para rerank). La factory `get_retriever()` es innecesaria para el cookbook y podria eliminarse o moverse a mteb.
+
+**Impacto de mover**: 1386 lineas (30%) saldrian de shared/. shared/ quedaria en ~3250 lineas, solo con tipos, retrieval, LLM y config — realmente compartidos.
+
+#### Tipos no usados por cookbook
+
+| Tipo en `shared/types.py` | Usado por |
+|---|---|
+| `GenerationResult` | solo mteb |
+| `LLMJudgeProtocol` | solo mteb (+ `shared/retrieval/__init__.py`) |
+| `get_dataset_config()` / `DATASET_CONFIG` | solo mteb (+ tiene entrada "cookbook" no usada) |
+
+No vale la pena moverlos — `types.py` es el nucleo compartido y estos tipos no estorban.
+
+#### Import no usado en cookbook
+
+`MetricType` se importa en `sandbox_cookbook/evaluator.py` pero nunca se usa. Eliminar.
+
+#### RetrievalConfig: campos mteb-only
+
+`RetrievalConfig` tiene ~15 campos. Cookbook usa ~10. Los restantes (`bm25_language`, etc.) tienen defaults razonables y no estorban — no vale refactorizar.

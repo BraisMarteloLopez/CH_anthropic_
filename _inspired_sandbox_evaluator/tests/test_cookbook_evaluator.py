@@ -280,7 +280,7 @@ class TestCookbookEvaluatorValidation:
         evaluator._validate_pass_at_k(detail, golden_contents, k=20)
 
     def test_validate_pass_at_k_divergence_raises(self):
-        """AssertionError when ID-based and content-based pass@k diverge."""
+        """ValueError when ID-based and content-based pass@k diverge."""
         evaluator = CookbookEvaluator.__new__(CookbookEvaluator)
 
         # ID-based: doc_1_chunk_0 is in top-20, so recall=1.0
@@ -293,7 +293,7 @@ class TestCookbookEvaluatorValidation:
         )
         golden_contents = ["function setup() {"]
 
-        with pytest.raises(AssertionError, match="Pass@"):
+        with pytest.raises(ValueError, match="Pass@"):
             evaluator._validate_pass_at_k(detail, golden_contents, k=20)
 
     def test_validate_empty_golden_is_ok(self):
