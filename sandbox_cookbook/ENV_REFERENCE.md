@@ -53,15 +53,15 @@ Valores posibles (fases incrementales):
 
 | Variable | Default | Descripcion |
 |---|---|---|
-| `EMBEDDING_BASE_URL` | `http://nim-embeddings:8080/v1` | Endpoint OpenAI-compatible del servicio NIM de embeddings |
-| `EMBEDDING_MODEL_NAME` | `nvidia/nv-embedqa-e5-v5` | Modelo servido en el NIM |
-| `EMBEDDING_MODEL_TYPE` | `symmetric` | `symmetric` (query=doc) o `asymmetric` (instrucciones distintas query/doc) |
+| `EMBEDDING_BASE_URL` | `http://172.30.79.98:8000/v1` | Endpoint OpenAI-compatible del servicio NIM de embeddings |
+| `EMBEDDING_MODEL_NAME` | `nvidia/llama-3.2-nv-embedqa-1b-v2` | Modelo servido en el NIM |
+| `EMBEDDING_MODEL_TYPE` | `asymmetric` | `symmetric` (query=doc) o `asymmetric` (instrucciones distintas query/doc) |
 | `EMBEDDING_BATCH_SIZE` | `5` | Chunks enviados por request HTTP al NIM |
 
 ### Notas
 
-- Cambiar `nim-embeddings` por la **IP/hostname real** de tu servidor.
-- `EMBEDDING_BATCH_SIZE=5` es conservador. Subir a `50` si el NIM tiene buena GPU/RAM.
+- El NIM de embeddings esta desplegado en `172.30.79.98:8000`.
+- `EMBEDDING_BATCH_SIZE=5` es conservador. Subir si el NIM tiene buena GPU/RAM.
 
 ---
 
