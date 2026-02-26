@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-Implementar un sandbox de evaluacion que replique fielmente la propuesta de Anthropic (blog + cookbook) sobre Contextual Retrieval, usando el mismo dataset (9 codebases, 248 queries), pero manteniendo la arquitectura y patrones del sandbox existente (es la ubicacion '_inspired_sandbox_evaluator', tambien llamado solucion 'RAG_P').
+Implementar un sandbox de evaluacion que replique fielmente la propuesta de Anthropic (blog + cookbook) sobre Contextual Retrieval, usando el mismo dataset (9 codebases, 248 queries), reutilizando la libreria compartida (`shared/`) de retrieval, embeddings y tipos.
 
 El sandbox debe permitir ejecutar y comparar 4 estrategias incrementales:
 
@@ -44,7 +44,7 @@ El cookbook usa dos archivos ([fuente](https://github.com/anthropics/anthropic-c
 ]
 ```
 
-**Punto critico:** Cada documento tiene un campo `content` con el texto completo del archivo. Este es el `WHOLE_DOCUMENT` que la propuesta de Anthropic requiere para generar contexto situacional. RAG_P no usaba este campo (DT-2). Este sandbox lo debe usar siempre.
+**Punto critico:** Cada documento tiene un campo `content` con el texto completo del archivo. Este es el `WHOLE_DOCUMENT` que la propuesta de Anthropic requiere para generar contexto situacional. Este sandbox lo usa siempre (resuelve DT-2).
 
 ### 2.3 Estructura de evaluation_set.jsonl
 
@@ -69,7 +69,7 @@ El dataset del cookbook tiene una estructura diferente a HotpotQA. No hay qrels 
 
 Mapeo propuesto:
 
-| Concepto cookbook | Concepto RAG_P (shared/types.py) |
+| Concepto cookbook | Concepto shared/types.py |
 |---|---|
 | `doc_id` + `chunk_index` | `doc_id` en `NormalizedDocument` |
 | `content` (chunk) | `NormalizedDocument.content` |
@@ -121,38 +121,37 @@ NormalizedDocument(
 ## 3. Arquitectura de archivos
 
 ```
-RAG_P/
-├── shared/                          # Cambios minimos, backwards-compatible
-│   ├── types.py                     # Sin cambios en tipos core
-│   ├── metrics.py                   # Agregar Pass@k
-│   ├── llm.py                       # Sin cambios
-│   ├── config_base.py               # Sin cambios
-│   ├── report.py                    # Extender para Pass@k
-│   ├── vector_store.py              # Sin cambios
-│   ├── structured_logging.py        # Sin cambios
+├── shared/                          # Libreria compartida
+│   ├── types.py                     # NormalizedQuery, LoadedDataset, EvaluationRun, Protocols
+│   ├── llm.py                       # AsyncLLMService, load_embedding_model, batch_embed_queries
+│   ├── config_base.py               # InfraConfig, RerankerConfig
+│   ├── vector_store.py              # ChromaVectorStore
 │   └── retrieval/
-│       ├── __init__.py              # Agregar CONTEXTUAL_VECTOR y CONTEXTUAL_HYBRID_RERANK
-│       ├── core.py                  # Agregar RetrievalStrategy entries
-│       ├── hybrid_retriever.py      # Sin cambios funcionales
-│       ├── contextual_retriever.py  # REFACTOR: Mode A obligatorio, prompts parametrizables
-│       ├── reranker.py              # Sin cambios
-│       └── tantivy_index.py         # Sin cambios
+│       ├── core.py                  # BaseRetriever, SimpleVectorRetriever, RetrievalConfig
+│       ├── hybrid_retriever.py      # BM25 + Vector + RRF (formulas classic + cookbook)
+│       ├── contextual_retriever.py  # LLMContextGenerator (Mode A, prompts XML Anthropic)
+│       ├── reranker.py              # CrossEncoderReranker (NVIDIARerank)
+│       └── tantivy_index.py         # BM25 via Tantivy (Rust, fallback rank-bm25)
 │
-├── sandbox_cookbook/                 # NUEVO sandbox
-│   ├── __init__.py
+├── sandbox_cookbook/                 # Evaluacion Contextual Retrieval
 │   ├── config.py                    # CookbookConfig
-│   ├── loader.py                    # Carga JSON local
-│   ├── evaluator.py                 # Pipeline: index -> retrieve -> Pass@k
-│   ├── run.py                       # Entry point
+│   ├── loader.py                    # JSON/JSONL local -> LoadedDataset
+│   ├── evaluator.py                 # Pipeline: 4 estrategias, Pass@k, comparison.csv
+│   ├── context_cache.py             # Cache persistente de contextos LLM
+│   ├── run.py                       # Entry point (--compare-all, --dry-run, -v)
 │   ├── env.example
 │   └── data/
 │       ├── codebase_chunks.json
 │       └── evaluation_set.jsonl
 │
-├── tests/
-│   ├── test_cookbook_loader.py
-│   ├── test_cookbook_pass_at_k.py
-│   └── test_contextual_mode_a.py
+├── tests/                           # 137 tests (pytest)
+│   ├── test_cookbook_config.py       # 23 tests
+│   ├── test_cookbook_loader.py       # 19 tests
+│   ├── test_cookbook_evaluator.py    # 29 tests
+│   ├── test_contextual_mode_a.py    # 26 tests
+│   ├── test_dtm4_rrf.py            # 20 tests
+│   ├── test_dtm4_tantivy_edge_cases.py  # 17 tests
+│   └── test_dt8_09_10_11_reranker_sort.py  # 3 tests
 ```
 
 ---
@@ -274,7 +273,7 @@ Answer only with the succinct context and nothing else.
 """
 ```
 
-Los prompts actuales de RAG_P (plain text headers) se mantienen como opcion para modelos nano que no manejan XML. La seleccion se hace via config.
+Prompts plain text se mantienen como opcion para modelos nano que no manejan XML. La seleccion se hace via config.
 
 **d) context_position parametrizable:**
 
@@ -291,7 +290,7 @@ class LLMContextGenerator:
         return f"{original}\n\n{context}"           # cookbook de Anthropic
 ```
 
-**Nota:** `EnrichedChunk.get_enriched_text()` se mantiene por backwards-compatibility con sandbox_mteb (siempre "prepend"). El CookbookEvaluator usa `_build_enriched_text()` del generator directamente.
+El CookbookEvaluator usa `_build_enriched_text()` del generator directamente.
 
 **e) Exponer enriched_contents para reranking:**
 
@@ -342,16 +341,16 @@ CookbookEvaluator._index_documents(dataset, corpus)
 7. build_run()  -> EvaluationRun
 ```
 
-**Diferencias clave con MTEBEvaluator:**
+**Caracteristicas del CookbookEvaluator:**
 
-| Aspecto | MTEBEvaluator | CookbookEvaluator |
-|---|---|---|
-| Dataset source | MinIO/Parquet | JSON local |
-| Metrica principal | hit@k, recall@k, MRR, NDCG@k | **Pass@k** |
-| Generacion LLM | Si (async, F1/EM/Faithfulness) | **No** |
-| Evaluacion | por doc_id | por **contenido exacto** + doc_id |
-| Documento padre | No se pasa (Mode B) | **Siempre** (Mode A) |
-| Estrategias | 2 (SIMPLE_VECTOR, CONTEXTUAL_HYBRID) | **4** |
+| Aspecto | CookbookEvaluator |
+|---|---|
+| Dataset source | JSON/JSONL local |
+| Metrica principal | **Pass@k** (=Recall@k) |
+| Generacion LLM | **No** (solo retrieval) |
+| Evaluacion | **contenido exacto** + doc_id |
+| Documento padre | **Siempre** (Mode A) |
+| Estrategias | **4** (SIMPLE_VECTOR, CONTEXTUAL_VECTOR, CONTEXTUAL_HYBRID, CONTEXTUAL_HYBRID_RERANK) |
 
 **Seleccion de estrategia:**
 
@@ -372,7 +371,7 @@ def _create_retriever(self):
         return ContextualRetriever(...)  # default inner = HybridRetriever
 ```
 
-**CONTEXTUAL_VECTOR es nuevo.** RAG_P no lo tiene. Permite medir el impacto aislado del enriquecimiento contextual sin BM25. Se logra pasando `inner_retriever=SimpleVectorRetriever(...)` a `ContextualRetriever`.
+**CONTEXTUAL_VECTOR** permite medir el impacto aislado del enriquecimiento contextual sin BM25. Se logra pasando `inner_retriever=SimpleVectorRetriever(...)` a `ContextualRetriever`.
 
 **Reranking como paso separado del retriever:**
 
@@ -454,12 +453,12 @@ score += bm25_weight * (1 / (index + 1))
 # Re-asigna scores 1/(new_rank+1) despues de sort
 ```
 
-RAG_P usa formula clasica:
+Formula clasica (alternativa):
 ```python
 rrf_contribution = weight / (k + rank)   # k=60
 ```
 
-**Decision:** Implementar ambas via `RRF_FORMULA` en config. Default `cookbook` para este sandbox, `classic` para sandbox_mteb. Ambas se implementan en `reciprocal_rank_fusion()` con parametro `formula`.
+**Decision:** Ambas formulas implementadas en `reciprocal_rank_fusion()` via parametro `formula`. Default `"cookbook"` para este sandbox.
 
 ---
 
@@ -518,73 +517,39 @@ Replica la tabla del cookbook:
 
 ---
 
-## 6. Cambios requeridos en shared/
-
-Todos backwards-compatible con sandbox_mteb.
+## 6. Cambios realizados en shared/
 
 ### 6.1 shared/retrieval/core.py
 
-```python
-class RetrievalStrategy(Enum):
-    SIMPLE_VECTOR = auto()
-    CONTEXTUAL_VECTOR = auto()           # NUEVO
-    CONTEXTUAL_HYBRID = auto()
-    CONTEXTUAL_HYBRID_RERANK = auto()    # NUEVO
-```
-
-Agregar `enriched_contents: Optional[List[str]] = None` a `RetrievalResult`.
+- Estrategias `CONTEXTUAL_VECTOR` y `CONTEXTUAL_HYBRID_RERANK` agregadas al enum
+- `enriched_contents: Optional[List[str]] = None` agregado a `RetrievalResult`
 
 ### 6.2 shared/retrieval/contextual_retriever.py
 
-- Parametro `mode` en LLMContextGenerator
+- Parametro `mode` en LLMContextGenerator (document/fallback)
 - Error si mode=document sin parent_content
 - Prompts parametrizables (Anthropic XML vs plain text)
-- `context_position` parametrizable
-- Exponer `enriched_contents` en resultado
+- `context_position` parametrizable (prepend/append)
+- `enriched_contents` expuesto en resultado
 
-### 6.3 shared/retrieval/__init__.py
+### 6.3 shared/retrieval/hybrid_retriever.py
 
-Actualizar factory para CONTEXTUAL_VECTOR (inner=SimpleVector).
+- Parametro `formula` en `reciprocal_rank_fusion()` ("classic" | "cookbook")
 
-### 6.4 shared/metrics.py
+### 6.4 shared/llm.py
 
-Agregar `RetrievalMetrics.pass_at_k()`.
-
-### 6.5 shared/retrieval/hybrid_retriever.py
-
-Agregar parametro `formula` a `reciprocal_rank_fusion()` ("classic" | "cookbook").
+- `batch_embed_queries()` extraido como funcion standalone
 
 ---
 
-## 7. Decisiones pendientes (requieren feedback)
+## 7. Decisiones tomadas
 
-### 7.1 Modelo de embedding
-
-**A)** NVIDIA NIM (consistente con infra) — resultados no comparables con cookbook
-**B)** Voyage AI (consistente con cookbook) — requiere nueva dependencia
-**C)** Soportar ambos via EMBEDDING_PROVIDER config
-
-Recomendacion: C.
-
-### 7.2 Reranker
-
-**A)** NVIDIA NIM (existente)
-**B)** Cohere (consistente con cookbook)
-**C)** Ambos via config
-
-Recomendacion: C.
-
-### 7.3 BM25 backend
-
-Mantener Tantivy (suficiente para 737 chunks). El texto enriquecido ya combina chunk + contexto, equivalente al multi_match del cookbook sobre campos separados.
-
-### 7.4 Contenido para reranking
-
-**A)** Solo original
-**B)** Original + contexto (como cookbook: `f"{original}\n\nContext: {context}"`)
-**C)** Parametrizable
-
-Recomendacion: B como default, configurable.
+| Aspecto | Decision | Rationale |
+|---|---|---|
+| Modelo de embedding | NVIDIA NIM | Consistente con infra. Resultados no comparables con cookbook (Voyage AI), pero comparacion relativa entre estrategias es valida. |
+| Reranker | NVIDIA NIM (NVIDIARerank) | Consistente con infra. Configurable via .env. |
+| BM25 backend | Tantivy (fallback rank-bm25) | Suficiente para 737 chunks. Texto enriquecido combina chunk + contexto. |
+| Contenido para reranking | Parametrizable (`rerank_content`) | "enriched" (default), "original", o "both". |
 
 ---
 

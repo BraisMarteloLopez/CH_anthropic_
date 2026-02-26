@@ -7,14 +7,12 @@ Estado: **COMPLETO** | Ultima actualizacion: 2026-02-25
 ## Estructura del repositorio
 
 ```
-_inspired_sandbox_evaluator/
-  shared/                    <- libreria comun (reutilizada)
-  sandbox_mteb/              <- sandbox HotpotQA (referencia, intacto)
-  sandbox_cookbook/           <- NUEVO: sandbox Contextual Retrieval
-  tests/                     <- tests existentes (162) + nuevos cookbook
+shared/                    <- libreria compartida (retrieval, embeddings, tipos)
+sandbox_cookbook/           <- sandbox Contextual Retrieval
+tests/                     <- 137 tests
 ```
 
-Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de tests para validar cambios backwards-compatible en `shared/`.
+> **Nota historica:** El plan original contemplaba convivencia con un sandbox mteb (HotpotQA). Ese sandbox fue eliminado posteriormente — solo queda el codigo directamente usado por sandbox_cookbook.
 
 ---
 
@@ -25,7 +23,7 @@ Ambos sandboxes conviven. `sandbox_mteb` se mantiene como referencia y red de te
 
 | # | Tarea | Criterio de aceptacion | Estado |
 |---|---|---|---|
-| 0.1 | Verificar 162 tests existentes pasan | `pytest tests/` sin fallos | **Hecho** |
+| 0.1 | Verificar tests existentes pasan | `pytest tests/` sin fallos | **Hecho** |
 | 0.2 | Obtener dataset del cookbook de Anthropic | Archivos parseables en `sandbox_cookbook/data/` | **Hecho** |
 | 0.3 | **(PC-6)** Agregar `sandbox_cookbook/data/` a `.gitignore` | Archivos de datos no se comitean | **Hecho** |
 
@@ -53,8 +51,8 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 | 1.10 | **Tests evaluator (SIMPLE_VECTOR)** | `tests/test_cookbook_evaluator.py` | Pipeline completo con mocks: load→index→retrieve→evaluate→build_run. Validacion Pass@k content-based assertion (9 tests) | **Hecho** |
 | 1.11 | **`__init__.py`** | `sandbox_cookbook/__init__.py` | Paquete Python valido | **Hecho** |
 | 1.12 | **`env.example`** | `sandbox_cookbook/env.example` | Template con todas las variables de entorno documentadas | **Hecho** |
-| 1.13 | **Registrar dataset en DATASET_CONFIG** | `shared/types.py` | Entrada `"cookbook"` en `DATASET_CONFIG` con `type=RETRIEVAL_ONLY`, `primary_metric=None`, sin generation | **Hecho** |
-| 1.14 | **Verificar tests originales pasan** | `tests/` | 198 tests passed (147 originales + 51 nuevos), 0 fallos, sin regresiones | **Hecho** |
+| 1.13 | ~~Registrar dataset en DATASET_CONFIG~~ | `shared/types.py` | ~~Entrada "cookbook" en DATASET_CONFIG~~ (eliminado en cleanup posterior — no se usa) | **Hecho** |
+| 1.14 | **Verificar tests pasan** | `tests/` | 137 tests passed, 0 fallos | **Hecho** |
 
 ### Fase 2: Contextual Embeddings (CONTEXTUAL_VECTOR) — Requiere LLM
 **Objetivo:** Enriquecimiento contextual con documento padre. Medir mejora vs baseline.
@@ -67,10 +65,10 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 | 2.4 | **(PC-3)** **Fix strategy hardcodeada** | `shared/retrieval/contextual_retriever.py` | `result.strategy_used = self.config.strategy` | **Hecho** |
 | 2.5 | **Exponer enriched_contents** | `shared/retrieval/contextual_retriever.py` | enriched_contents guardado antes de swap, + mapa _enriched_contents | **Hecho** |
 | 2.6 | **Cache persistente** | `sandbox_cookbook/context_cache.py` | ContextCache: JSON en disco, invalidacion por hash modelo+prompt | **Hecho** |
-| 2.7 | **Factory CONTEXTUAL_VECTOR** | `shared/retrieval/__init__.py` | get_retriever soporta CONTEXTUAL_VECTOR (inner=SimpleVector) + CONTEXTUAL_HYBRID_RERANK + **context_kwargs | **Hecho** |
+| 2.7 | ~~Factory CONTEXTUAL_VECTOR~~ | `shared/retrieval/__init__.py` | ~~get_retriever con CONTEXTUAL_VECTOR~~ (factory eliminada en cleanup — cookbook construye retrievers directamente) | **Hecho** |
 | 2.8 | **Integrar en evaluator** | `sandbox_cookbook/evaluator.py` | CONTEXTUAL_VECTOR: LLM init, parent_content, Anthropic prompts, cache load/save | **Hecho** |
 | 2.9 | **Tests Mode A + fixes** | `tests/test_contextual_mode_a.py` | 26 tests: truncation, mode, XML prompts, context_position, strategy (PC-3), enriched_contents, ContextCache | **Hecho** |
-| 2.10 | **Verificar tests** | `tests/` | 224 passed (147 originales + 77 nuevos), 0 fallos, sin regresiones | **Hecho** |
+| 2.10 | **Verificar tests** | `tests/` | 137 passed, 0 fallos | **Hecho** |
 
 ### Fase 3: Hybrid Search (CONTEXTUAL_HYBRID)
 **Objetivo:** BM25 sobre texto enriquecido + RRF. Medir mejora adicional.
@@ -87,7 +85,7 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 | # | Tarea | Archivos | Detalle | Estado |
 |---|---|---|---|---|
 | 4.1 | **Reranking en evaluator** | `sandbox_cookbook/evaluator.py` | Over-sample + seleccion contenido + CrossEncoderReranker + truncar | **Hecho** |
-| 4.2 | **Factory CONTEXTUAL_HYBRID_RERANK** | `shared/retrieval/__init__.py` | Misma creacion que CONTEXTUAL_HYBRID (reranking en evaluator) | **Hecho** |
+| 4.2 | ~~Factory CONTEXTUAL_HYBRID_RERANK~~ | `shared/retrieval/__init__.py` | ~~Factory~~ (eliminada — reranking gestionado directamente en evaluator) | **Hecho** |
 
 ### Fase 5: Comparacion y Reporte
 **Objetivo:** Tabla comparativa de las 4 estrategias, replicando la del cookbook.
@@ -102,8 +100,8 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 | # | Tarea | Detalle | Estado |
 |---|---|---|---|
-| 6.1 | Suite completa de tests | 253 passed, 1 skipped, 0 failures (147 originales + 106 nuevos) | **Hecho** |
-| 6.2 | Verificar mypy | 0 errores en sandbox_cookbook/ (30 pre-existentes en shared/ no tocados) | **Hecho** |
+| 6.1 | Suite completa de tests | 137 passed, 0 failures | **Hecho** |
+| 6.2 | Verificar mypy | 0 errores en sandbox_cookbook/ | **Hecho** |
 | 6.3 | Marcar DT-2 como resuelta | Mode A ("document") implementado en LLMContextGenerator con prompts Anthropic XML | **Hecho** |
 
 ---
@@ -124,13 +122,10 @@ Se descargan una vez y se colocan en `sandbox_cookbook/data/`. No se usa MinIO n
 
 ### No se implementa (descartado)
 
-- Clase `RetrievalMetrics` como modulo independiente — Recall@k ya existe en `QueryRetrievalDetail`. Pass@k = Recall@k algebraicamente. Content-based matching se implementa como assertion de validacion dentro del CookbookEvaluator (no como metrica separada). Ver DESIGN seccion 4.6
+- Clase `RetrievalMetrics` como modulo independiente — Pass@k = Recall@k, ya existe en `QueryRetrievalDetail`
 - Pipeline de generacion LLM — Anthropic no la usa en el cookbook
-- Metricas de generacion (F1, EM, Accuracy) — No aplican
-- Metricas LLM-judge (Faithfulness, Answer Relevance, Context Utilization) — No aplican
+- Metricas de generacion (F1, EM, Accuracy, Faithfulness) — No aplican
 - Hit@k, MRR, NDCG@k en salida — Anthropic no las reporta
 - Soporte Voyage AI / Cohere — NIM primero
-- Exporter generico extendido — CSV minimalista directo en evaluator
 - Title en NormalizedDocument para chunks de codigo — Contamina embeddings (PC-1)
-- Truncamiento fijo 2000/1000 chars — Destruye approach Anthropic (PC-2)
-- Sistema de carga MinIO/Parquet para cookbook — Se replica el sistema del cookbook Anthropic (JSON/JSONL local)
+- Sistema de carga MinIO/Parquet — JSON/JSONL local replica el cookbook original
