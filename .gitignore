@@ -1,6 +1,3 @@
-# Dataset (archivos grandes, no comitear)
-sandbox_cookbook/data/
-
 # Python
 __pycache__/
 *.pyc
