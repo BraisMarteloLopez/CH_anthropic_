@@ -21,6 +21,9 @@ python-dotenv>=1.0.0,<2.0
 tantivy>=0.22.0
 # rank-bm25 como fallback si Tantivy no compila en el entorno
 rank-bm25>=0.2.2,<0.3
+# Elasticsearch: backend BM25 alternativo (replica cookbook Anthropic)
+# Opcional: solo necesario si BM25_BACKEND=elasticsearch
+elasticsearch>=8.0.0,<9.0
 
 # --- Reranking ---
 # NVIDIARerank incluido via langchain-nvidia-ai-endpoints.

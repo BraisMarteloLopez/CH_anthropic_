@@ -61,6 +61,8 @@ class RetrievalConfig:
 
     # BM25
     bm25_language: str = "en"
+    bm25_backend: str = "auto"  # "auto" | "tantivy" | "elasticsearch" | "rank_bm25"
+    elasticsearch_host: str = "http://localhost:9200"
 
     # HNSW (ChromaDB): num_threads=1 reduce no-determinismo del grafo
     # (elimina variabilidad de threading). No garantiza reproducibilidad
@@ -80,6 +82,8 @@ class RetrievalConfig:
             context_max_tokens=_env_int("RETRIEVAL_CONTEXT_MAX_TOKENS", 100),
             context_batch_size=_env_int("RETRIEVAL_CONTEXT_BATCH_SIZE", 50),
             bm25_language=_env("RETRIEVAL_BM25_LANGUAGE", "en"),
+            bm25_backend=_env("BM25_BACKEND", "auto"),
+            elasticsearch_host=_env("ELASTICSEARCH_HOST", "http://localhost:9200"),
             hnsw_num_threads=_env_int("HNSW_NUM_THREADS", 1),
         )
 

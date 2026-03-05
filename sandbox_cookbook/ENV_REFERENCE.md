@@ -117,11 +117,38 @@ COOKBOOK_CONTEXTS_CACHE_PATH=sandbox_cookbook/data/contexts_cache.json
 | `COOKBOOK_SEMANTIC_WEIGHT` | `0.8` | Peso del score de embedding en la fusion |
 | `COOKBOOK_BM25_WEIGHT` | `0.2` | Peso del score BM25 (lexico) en la fusion |
 | `COOKBOOK_NUM_CHUNKS_TO_RECALL` | `150` | Candidatos a recuperar del indice antes de fusionar/reranquear |
+| `BM25_BACKEND` | `auto` | Backend BM25: `auto`, `tantivy`, `elasticsearch`, `rank_bm25` |
+| `ELASTICSEARCH_HOST` | `http://localhost:9200` | URL del servidor Elasticsearch (solo si `BM25_BACKEND=elasticsearch`) |
+
+### Backend BM25
+
+| Valor | Motor | Requisitos |
+|---|---|---|
+| `auto` | Selecciona automaticamente: Tantivy > Elasticsearch > rank_bm25 | Al menos uno instalado |
+| `tantivy` | Tantivy (Rust, embebido, sin servidor) | `pip install tantivy` |
+| `elasticsearch` | Elasticsearch (replica cookbook Anthropic) | `pip install elasticsearch` + servidor ES corriendo |
+| `rank_bm25` | rank-bm25 (Python puro, in-memory, legacy) | `pip install rank-bm25` |
+
+Para usar Elasticsearch:
+
+```bash
+# Levantar Elasticsearch local
+docker run -d --name elasticsearch -p 9200:9200 \
+  -e "discovery.type=single-node" \
+  -e "xpack.security.enabled=false" \
+  -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" \
+  elasticsearch:8.17.0
+
+# Configurar en .env
+BM25_BACKEND=elasticsearch
+ELASTICSEARCH_HOST=http://localhost:9200
+```
 
 ### Notas
 
 - Los pesos deben sumar ~1.0. `0.8/0.2` = dominan embeddings, BM25 aporta senal lexica complementaria.
 - Mas `NUM_CHUNKS_TO_RECALL` = mejor recall potencial pero mas lento.
+- `elasticsearch` replica exactamente la implementacion del cookbook de Anthropic (analyzer por idioma, similarity BM25, multi_match sobre content + contextualized_content).
 
 ---
 

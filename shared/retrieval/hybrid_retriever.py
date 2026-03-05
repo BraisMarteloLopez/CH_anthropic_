@@ -33,6 +33,13 @@ except ImportError:
     HAS_TANTIVY = False
     TantivyIndex = None  # type: ignore
 
+# --- Elasticsearch (replica cookbook Anthropic) ---
+try:
+    from .elasticsearch_index import ElasticsearchBM25Index, HAS_ELASTICSEARCH
+except ImportError:
+    HAS_ELASTICSEARCH = False
+    ElasticsearchBM25Index = None  # type: ignore
+
 # --- rank_bm25 (fallback) ---
 try:
     from rank_bm25 import BM25Okapi
@@ -203,12 +210,6 @@ class HybridRetriever(BaseRetriever):
     ):
         super().__init__(config)
 
-        if not HAS_TANTIVY and not HAS_BM25:
-            raise ImportError(
-                "Se requiere tantivy (pip install tantivy) o "
-                "rank-bm25 (pip install rank-bm25) para HybridRetriever"
-            )
-
         self.embedding_model = embedding_model
 
         from .core import SimpleVectorRetriever
@@ -220,26 +221,97 @@ class HybridRetriever(BaseRetriever):
             embedding_batch_size=embedding_batch_size,
         )
 
-        # Preferir Tantivy sobre rank_bm25
-        self._bm25_index: "TantivyIndex | BM25Index"  # Union, duck-typed .search()
-        if HAS_TANTIVY:
-            self._bm25_index = TantivyIndex(
-                language=config.bm25_language,
-            )
-            self._bm25_backend = "tantivy"
-            logger.info(
-                f"HybridRetriever: BM25 backend = Tantivy "
-                f"(lang={config.bm25_language})"
-            )
-        else:
-            self._bm25_index = BM25Index(language=config.bm25_language)
-            self._bm25_backend = "rank_bm25"
-            logger.warning(
-                "HybridRetriever: Tantivy no disponible, "
-                "usando rank_bm25 (legacy, in-memory)"
-            )
+        # Seleccion de backend BM25
+        self._bm25_index, self._bm25_backend = self._init_bm25_backend(config)
 
         self._doc_map: Dict[str, str] = {}
+
+    @staticmethod
+    def _init_bm25_backend(config: RetrievalConfig):
+        """
+        Selecciona backend BM25 segun config.bm25_backend.
+
+        Valores:
+          - "auto": Tantivy > Elasticsearch > rank_bm25 (prioridad)
+          - "tantivy": fuerza Tantivy
+          - "elasticsearch": fuerza Elasticsearch
+          - "rank_bm25": fuerza rank-bm25 (legacy)
+
+        Returns:
+            Tupla (bm25_index, backend_name)
+        """
+        backend = config.bm25_backend.lower().strip()
+        lang = config.bm25_language
+
+        if backend == "elasticsearch":
+            if not HAS_ELASTICSEARCH:
+                raise ImportError(
+                    "BM25_BACKEND=elasticsearch pero elasticsearch no instalado: "
+                    "pip install elasticsearch"
+                )
+            idx = ElasticsearchBM25Index(
+                host=config.elasticsearch_host,
+                language=lang,
+            )
+            logger.info(
+                f"HybridRetriever: BM25 backend = Elasticsearch "
+                f"(host={config.elasticsearch_host}, lang={lang})"
+            )
+            return idx, "elasticsearch"
+
+        if backend == "tantivy":
+            if not HAS_TANTIVY:
+                raise ImportError(
+                    "BM25_BACKEND=tantivy pero tantivy no instalado: "
+                    "pip install tantivy"
+                )
+            idx = TantivyIndex(language=lang)
+            logger.info(
+                f"HybridRetriever: BM25 backend = Tantivy (lang={lang})"
+            )
+            return idx, "tantivy"
+
+        if backend == "rank_bm25":
+            if not HAS_BM25:
+                raise ImportError(
+                    "BM25_BACKEND=rank_bm25 pero rank-bm25 no instalado: "
+                    "pip install rank-bm25"
+                )
+            idx = BM25Index(language=lang)
+            logger.info("HybridRetriever: BM25 backend = rank_bm25 (legacy)")
+            return idx, "rank_bm25"
+
+        # auto: prioridad Tantivy > Elasticsearch > rank_bm25
+        if HAS_TANTIVY:
+            idx = TantivyIndex(language=lang)
+            logger.info(
+                f"HybridRetriever: BM25 backend = Tantivy [auto] (lang={lang})"
+            )
+            return idx, "tantivy"
+
+        if HAS_ELASTICSEARCH:
+            idx = ElasticsearchBM25Index(
+                host=config.elasticsearch_host,
+                language=lang,
+            )
+            logger.info(
+                f"HybridRetriever: BM25 backend = Elasticsearch [auto] "
+                f"(host={config.elasticsearch_host}, lang={lang})"
+            )
+            return idx, "elasticsearch"
+
+        if HAS_BM25:
+            idx = BM25Index(language=lang)
+            logger.warning(
+                "HybridRetriever: usando rank_bm25 [auto] (legacy, in-memory)"
+            )
+            return idx, "rank_bm25"
+
+        raise ImportError(
+            "Se requiere tantivy (pip install tantivy), "
+            "elasticsearch (pip install elasticsearch), o "
+            "rank-bm25 (pip install rank-bm25) para HybridRetriever"
+        )
 
     def index_documents(
         self,
@@ -413,4 +485,5 @@ __all__ = [
     "reciprocal_rank_fusion",
     "HAS_BM25",
     "HAS_TANTIVY",
+    "HAS_ELASTICSEARCH",
 ]
